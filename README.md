@@ -2,6 +2,8 @@
 
 Real-time water wave simulation using WebGPU compute shaders.
 
+This is a learning project to learn how water based simulation/rendering works using WebGPU. I am relying on three.js only to load the cubemap.
+
 ## Requirements
 
 - Modern browser with WebGPU
@@ -29,6 +31,10 @@ npm run preview
 - `src/camera/` - Orbit camera controls
 - `src/wgpu/` - WebGPU context management
 - `src/shaders/` - WGSL shader code
+
+## Resources
+
+The skymap was taken from [polyhaven](https://polyhaven.com/hdris/skies)
 
 ## License
 
