@@ -36,6 +36,13 @@ npm run preview
 
 The skymap was taken from [polyhaven](https://polyhaven.com/hdris/skies)
 
+## Planned work
+
+1. **Dispersion** - Frequency-dependent wave speed for more realistic propagation
+2. **Refraction** - Scene distortion through water surface
+3. **Caustics** - Light patterns on bathtub floor
+4. **Foam/spray** - Particle effects at wave peaks
+
 ## License
 
 MIT
