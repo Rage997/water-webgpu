@@ -1,4 +1,4 @@
-import { NX, NZ, NUM_VERTS, DELTA_X, DELTA_Z, NW, NH, W, H } from '../types.ts';
+import { W, H, type Grid } from '../types.ts';
 
 function makeWaterVertexShader(nx: number, nz: number, dx: number, dz: number) {
   return `
@@ -56,9 +56,18 @@ fn main(@builtin(vertex_index) idx: u32, input: VertexInput) -> VertexOutput {
 }
 
 const WATER_FRAG = `
-@group(0) @binding(2) var skyboxTexture: texture_cube<f32>;
+@group(0) @binding(2) var skyboxTexture: texture_2d<f32>;
 @group(0) @binding(3) var skyboxSampler: sampler;
 @group(0) @binding(4) var<uniform> timeData: vec4f;
+
+const PI = 3.14159265359;
+
+// Map a unit direction to equirectangular UV (latitude-longitude).
+fn dirToEquirectUV(dir: vec3f) -> vec2f {
+  let u = atan2(dir.z, dir.x) / (2.0 * PI) + 0.5;
+  let v = acos(clamp(dir.y, -1.0, 1.0)) / PI;
+  return vec2f(u, v);
+}
 
 fn fresnel_schlick(cosTheta: f32, F0: f32) -> f32 {
   return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
@@ -103,9 +112,9 @@ fn main(in: VertexOutput) -> @location(0) vec4f {
   let F0 = 0.02; // Water base reflectivity cosntant
   let fresnel = fresnel_schlick(max(dot(n, v), 0.0), F0);
   
-  // Sample skybox reflection (scaled by sky intensity in timeData.y)
+  // Sample skybox reflection via equirect UV (scaled by sky intensity in timeData.y)
   let reflectDir = reflect(-v, n);
-  let skyColor = textureSample(skyboxTexture, skyboxSampler, reflectDir).rgb * timeData.y;
+  let skyColor = textureSample(skyboxTexture, skyboxSampler, dirToEquirectUV(reflectDir)).rgb * timeData.y;
   
   // Water colors - darker for depth
   let waterColor = vec3f(0.0, 0.4, 0.55);
@@ -126,7 +135,7 @@ fn main(in: VertexOutput) -> @location(0) vec4f {
   
   // Combine: blend water color with sky reflection based on Fresnel
   let refracted = ambient + diffuse;
-  // let reflected = skyColor * fresnel;
+  let reflected = skyColor * fresnel;
   let finalColor = refracted + reflected + vec3f(spec);
   
   return vec4f(finalColor, 0.85);
@@ -145,6 +154,7 @@ export class WaterRender {
   vertexBuffer!: GPUBuffer;
   indexBuffer!: GPUBuffer;
   indexCount!: number;
+  indexFormat!: GPUIndexFormat;
   bindGroupLayout!: GPUBindGroupLayout;
   bindGroup!: GPUBindGroup;
   cameraBuffer!: GPUBuffer;
@@ -154,25 +164,25 @@ export class WaterRender {
 
   private _device: GPUDevice;
 
-  constructor(device: GPUDevice, format: GPUTextureFormat, depthFormat: GPUTextureFormat) {
+  constructor(device: GPUDevice, format: GPUTextureFormat, depthFormat: GPUTextureFormat, grid: Grid) {
     this._device = device;
 
-    const positions = new Float32Array(NUM_VERTS * 2);
+    const positions = new Float32Array(grid.NUM_VERTS * 2);
     const indices: number[] = [];
 
-    for (let iz = 0; iz < NZ; iz++) {
-      for (let ix = 0; ix < NX; ix++) {
-        const i = iz * NX + ix;
-        positions[i * 2] = -W / 2 + ix * DELTA_X;
-        positions[i * 2 + 1] = -H / 2 + iz * DELTA_Z;
+    for (let iz = 0; iz < grid.NZ; iz++) {
+      for (let ix = 0; ix < grid.NX; ix++) {
+        const i = iz * grid.NX + ix;
+        positions[i * 2] = -W / 2 + ix * grid.DELTA_X;
+        positions[i * 2 + 1] = -H / 2 + iz * grid.DELTA_Z;
       }
     }
 
-    for (let iz = 0; iz < NH; iz++) {
-      for (let ix = 0; ix < NW; ix++) {
-        const a = iz * NX + ix;
+    for (let iz = 0; iz < grid.NH; iz++) {
+      for (let ix = 0; ix < grid.NW; ix++) {
+        const a = iz * grid.NX + ix;
         const b = a + 1;
-        const c = a + NX;
+        const c = a + grid.NX;
         const d = c + 1;
         indices.push(a, b, c, b, d, c);
       }
@@ -188,12 +198,17 @@ export class WaterRender {
     new Float32Array(this.vertexBuffer.getMappedRange()).set(positions);
     this.vertexBuffer.unmap();
 
+    // Use Uint32 for index buffer if vertex count exceeds Uint16 max (65535)
+    const indexFormat: GPUIndexFormat = grid.NUM_VERTS > 65535 ? 'uint32' : 'uint16';
+    this.indexFormat = indexFormat;
+    const indexBufferSize = indices.length * (grid.NUM_VERTS > 65535 ? 4 : 2);
+    const IndexArray = grid.NUM_VERTS > 65535 ? Uint32Array : Uint16Array;
     this.indexBuffer = device.createBuffer({
-      size: indices.length * 2,
+      size: indexBufferSize,
       usage: GPUBufferUsage.INDEX,
       mappedAtCreation: true,
     });
-    new Uint16Array(this.indexBuffer.getMappedRange()).set(indices);
+    new IndexArray(this.indexBuffer.getMappedRange()).set(indices);
     this.indexBuffer.unmap();
 
     this.cameraBuffer = device.createBuffer({
@@ -209,10 +224,11 @@ export class WaterRender {
     this.skyboxSampler = device.createSampler({
       magFilter: 'linear',
       minFilter: 'linear',
-      mipmapFilter: 'linear',
+      addressModeU: 'repeat',
+      addressModeV: 'clamp-to-edge',
     });
 
-    const vertSrc = makeWaterVertexShader(NX, NZ, DELTA_X, DELTA_Z);
+    const vertSrc = makeWaterVertexShader(grid.NX, grid.NZ, grid.DELTA_X, grid.DELTA_Z);
     const vertexModule = device.createShaderModule({ code: vertSrc });
     const fragmentModule = device.createShaderModule({ code: WATER_FRAG });
 
@@ -220,7 +236,7 @@ export class WaterRender {
       entries: [
         { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
         { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
-        { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: 'cube' } },
+        { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d' } },
         { binding: 3, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
         { binding: 4, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
       ],
@@ -256,6 +272,13 @@ export class WaterRender {
     });
   }
 
+  dispose() {
+    this.vertexBuffer.destroy();
+    this.indexBuffer.destroy();
+    this.cameraBuffer.destroy();
+    this.timeBuffer.destroy();
+  }
+
   updateCamera(viewProj: Float32Array, eyeX: number, eyeY: number, eyeZ: number) {
     const data = new Float32Array(20);
     data.set(viewProj, 0);
@@ -282,7 +305,7 @@ export class WaterRender {
       entries: [
         { binding: 0, resource: { buffer } },
         { binding: 1, resource: { buffer: this.cameraBuffer } },
-        { binding: 2, resource: this.skyboxTexture.createView({ dimension: 'cube' }) },
+        { binding: 2, resource: this.skyboxTexture.createView() },
         { binding: 3, resource: this.skyboxSampler },
         { binding: 4, resource: { buffer: this.timeBuffer } },
       ],
@@ -293,7 +316,7 @@ export class WaterRender {
     pass.setPipeline(this.pipeline);
     pass.setBindGroup(0, this.bindGroup);
     pass.setVertexBuffer(0, this.vertexBuffer);
-    pass.setIndexBuffer(this.indexBuffer, 'uint16');
+    pass.setIndexBuffer(this.indexBuffer, this.indexFormat);
     pass.drawIndexed(this.indexCount);
   }
 }
