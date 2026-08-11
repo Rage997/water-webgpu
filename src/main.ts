@@ -6,7 +6,8 @@ import { Bathtub } from './scene/bathtub.ts';
 import { Floor } from './scene/floor.ts';
 import { Skybox } from './scene/skybox.ts';
 import { setupInteraction } from './water/interaction.ts';
-import type { ClickData } from './types.ts';
+import { makeGrid, RESOLUTION_TIERS } from './types.ts';
+import type { ClickData, ResolutionTier } from './types.ts';
 
 declare global {
   interface Window {
@@ -27,8 +28,9 @@ async function main() {
   camera.updateAspect(width() / height());
   camera.updateView();
 
-  const waterCompute = new WaterCompute(device);
-  const waterRender = new WaterRender(device, format, depthFormat);
+  let grid = makeGrid(RESOLUTION_TIERS.high);
+  let waterCompute = new WaterCompute(device, grid);
+  let waterRender = new WaterRender(device, format, depthFormat, grid);
 
   const bathtub = new Bathtub(device, format, depthFormat);
   const floor = new Floor(device, format, depthFormat);
@@ -52,10 +54,14 @@ async function main() {
   const skyboxSelect = document.getElementById('skybox-select') as HTMLSelectElement;
   const skyIntensitySlider = document.getElementById('sky-intensity') as HTMLInputElement;
   const skyIntensityValue = document.getElementById('sky-intensity-value') as HTMLSpanElement;
-  const rippleStrengthSlider = document.getElementById('ripple-strength') as HTMLInputElement;
-  const rippleStrengthValue = document.getElementById('ripple-strength-value') as HTMLSpanElement;
-  const rippleDampingSlider = document.getElementById('ripple-damping') as HTMLInputElement;
-  const rippleDampingValue = document.getElementById('ripple-damping-value') as HTMLSpanElement;
+  const waveSpeedSlider = document.getElementById('wave-speed') as HTMLInputElement;
+  const waveSpeedValue = document.getElementById('wave-speed-value') as HTMLSpanElement;
+  const dampingSlider = document.getElementById('damping') as HTMLInputElement;
+  const dampingValue = document.getElementById('damping-value') as HTMLSpanElement;
+  const rippleAmplitudeSlider = document.getElementById('ripple-amplitude') as HTMLInputElement;
+  const rippleAmplitudeValue = document.getElementById('ripple-amplitude-value') as HTMLSpanElement;
+  const rippleSizeSlider = document.getElementById('ripple-size') as HTMLInputElement;
+  const rippleSizeValue = document.getElementById('ripple-size-value') as HTMLSpanElement;
   const ambientFrequencySlider = document.getElementById('ambient-frequency') as HTMLInputElement;
   const ambientFrequencyValue = document.getElementById('ambient-frequency-value') as HTMLSpanElement;
   const ambientStrengthSlider = document.getElementById('ambient-strength') as HTMLInputElement;
@@ -82,6 +88,35 @@ async function main() {
     }
   });
 
+  // Resolution selection: rebuilds the water grid (compute + render) in place,
+  // preserving camera and current sim settings. Water surface resets (expected).
+  const resolutionSelect = document.getElementById('resolution-select') as HTMLSelectElement;
+  resolutionSelect.addEventListener('change', () => {
+    const nh = RESOLUTION_TIERS[resolutionSelect.value as ResolutionTier];
+    if (!nh) return;
+
+    const prevCompute = waterCompute;
+    const prevRender = waterRender;
+
+    grid = makeGrid(nh);
+    waterCompute = new WaterCompute(device, grid);
+    // Carry the live control values over so changing resolution doesn't reset them.
+    waterCompute.waveSpeed = prevCompute.waveSpeed;
+    waterCompute.damping = prevCompute.damping;
+    waterCompute.rippleAmplitude = prevCompute.rippleAmplitude;
+    waterCompute.rippleSize = prevCompute.rippleSize;
+    waterCompute.ambientFrequency = prevCompute.ambientFrequency;
+    waterCompute.ambientStrength = prevCompute.ambientStrength;
+
+    waterRender = new WaterRender(device, format, depthFormat, grid);
+    waterRender.setSkyboxTexture(skybox.getTexture());
+    waterRender.setStateBuffer(waterCompute.currentStateBuffer);
+
+    prevCompute.dispose();
+    prevRender.dispose();
+    window.waterControl = waterCompute;
+  });
+
   // Sky intensity control
   skyIntensitySlider.addEventListener('input', () => {
     const value = parseFloat(skyIntensitySlider.value);
@@ -89,18 +124,32 @@ async function main() {
     skyIntensityValue.textContent = value.toFixed(1);
   });
 
-  // Ripple strength control
-  rippleStrengthSlider.addEventListener('input', () => {
-    const value = parseFloat(rippleStrengthSlider.value);
-    waterCompute.rippleStrength = value;
-    rippleStrengthValue.textContent = value.toFixed(1);
+  // Wave speed control (propagation speed; dt is CFL-clamped so it stays stable)
+  waveSpeedSlider.addEventListener('input', () => {
+    const value = parseFloat(waveSpeedSlider.value);
+    waterCompute.waveSpeed = value;
+    waveSpeedValue.textContent = value.toFixed(2);
   });
 
-  // Ripple damping control
-  rippleDampingSlider.addEventListener('input', () => {
-    const value = parseFloat(rippleDampingSlider.value);
-    waterCompute.rippleDamping = value;
-    rippleDampingValue.textContent = value.toFixed(3);
+  // Damping control (0..1 wave decay, mapped to a stable drag rate inside the sim)
+  dampingSlider.addEventListener('input', () => {
+    const value = parseFloat(dampingSlider.value);
+    waterCompute.damping = value;
+    dampingValue.textContent = value.toFixed(2);
+  });
+
+  // Ripple amplitude control (click splash height)
+  rippleAmplitudeSlider.addEventListener('input', () => {
+    const value = parseFloat(rippleAmplitudeSlider.value);
+    waterCompute.rippleAmplitude = value;
+    rippleAmplitudeValue.textContent = value.toFixed(0);
+  });
+
+  // Ripple size control (click splash width)
+  rippleSizeSlider.addEventListener('input', () => {
+    const value = parseFloat(rippleSizeSlider.value);
+    waterCompute.rippleSize = value;
+    rippleSizeValue.textContent = value.toFixed(1);
   });
 
   // Ambient wave frequency control
