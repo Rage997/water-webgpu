@@ -191,7 +191,7 @@ export class Skybox {
   private async _loadSky(filename?: string) {
     const skyFile = filename || this._currentSkybox;
     try {
-      const { data, width, height } = await loadEXR(`/textures/${skyFile}`);
+      const { data, width, height } = await loadEXR(`${import.meta.env.BASE_URL}textures/${skyFile}`);
       if (width !== EQUIRECT_W || height !== EQUIRECT_H) {
         console.error(`Sky EXR is ${width}x${height}, expected ${EQUIRECT_W}x${EQUIRECT_H}`);
         return;

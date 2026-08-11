@@ -192,7 +192,7 @@ export class Bathtub {
     );
 
     // Load actual texture
-    this._loadTexture('/tiles.jpg');
+    this._loadTexture(`${import.meta.env.BASE_URL}tiles.jpg`);
 
     const vertModule = device.createShaderModule({ code: TUB_VERT });
     const fragModule = device.createShaderModule({ code: TUB_FRAG });

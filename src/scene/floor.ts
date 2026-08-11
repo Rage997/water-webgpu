@@ -144,7 +144,7 @@ export class Floor {
       { width: 1, height: 1 }
     );
 
-    this._loadTexture('/textures/floortiles.jpg');
+    this._loadTexture(`${import.meta.env.BASE_URL}textures/floortiles.jpg`);
 
     const vertModule = device.createShaderModule({ code: FLOOR_VERT });
     const fragModule = device.createShaderModule({ code: FLOOR_FRAG });
