@@ -4,6 +4,10 @@ Real-time water wave simulation using WebGPU compute shaders.
 
 This is a learning project to learn how water based simulation/rendering works using WebGPU. I am relying on three.js only to load the cubemap.
 
+## Demo
+
+<video src="./assets/demo.mp4" controls loop muted width="640"></video>
+
 ## Requirements
 
 - Modern browser with WebGPU
