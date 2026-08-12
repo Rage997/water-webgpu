@@ -6,7 +6,7 @@ This is a learning project to learn how water based simulation/rendering works u
 
 ## Demo
 
-<video src="./assets/demo.mp4" controls loop muted width="640"></video>
+Live demo: <https://rage997.github.io/water-webgpu/>
 
 ## Requirements
 
