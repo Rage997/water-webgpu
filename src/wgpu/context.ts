@@ -2,15 +2,17 @@ export async function initWebGPU(canvas: HTMLCanvasElement) {
   const adapter = await navigator.gpu.requestAdapter();
   if (!adapter) throw new Error('No WebGPU adapter found');
   const device = await adapter.requestDevice();
-
+  device.lost.then((info) => {
+    console.error('WebGPU device lost:', info.message);
+  });
   const context = canvas.getContext('webgpu') as GPUCanvasContext;
   const format = navigator.gpu.getPreferredCanvasFormat();
 
   const depthFormat: GPUTextureFormat = 'depth24plus';
 
   function configure() {
-    const width = Math.max(1, canvas.clientWidth * devicePixelRatio);
-    const height = Math.max(1, canvas.clientHeight * devicePixelRatio);
+    const width = Math.max(1, Math.round(canvas.clientWidth * devicePixelRatio));
+    const height = Math.max(1, Math.round(canvas.clientHeight * devicePixelRatio));
     canvas.width = width;
     canvas.height = height;
 
@@ -27,8 +29,8 @@ export async function initWebGPU(canvas: HTMLCanvasElement) {
   let depthTexture = createDepthTexture(device, depthFormat, width, height);
 
   function resize() {
-    const w = Math.max(1, canvas.clientWidth * devicePixelRatio);
-    const h = Math.max(1, canvas.clientHeight * devicePixelRatio);
+    const w = Math.max(1, Math.round(canvas.clientWidth * devicePixelRatio));
+    const h = Math.max(1, Math.round(canvas.clientHeight * devicePixelRatio));
     if (w !== width || h !== height) {
       width = w; height = h;
       canvas.width = width;
