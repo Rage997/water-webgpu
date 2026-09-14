@@ -14,6 +14,7 @@ export class OrbitCamera {
   private _viewMatrix: Float32Array = new Float32Array(16);
   private _projMatrix: Float32Array = new Float32Array(16);
   private _viewProjMatrix: Float32Array = new Float32Array(16);
+  private _viewProjDirty = true;
 
   private _isDragging = false;
   private _prevMouseX = 0;
@@ -26,7 +27,10 @@ export class OrbitCamera {
   get viewMatrix(): Float32Array { return this._viewMatrix; }
   get projMatrix(): Float32Array { return this._projMatrix; }
   get viewProjMatrix(): Float32Array {
+    // Cached: computed once per frame (invalidated by update/updateAspect/
+    if (!this._viewProjDirty) return this._viewProjMatrix;
     multiply(this._projMatrix, this._viewMatrix, this._viewProjMatrix);
+    this._viewProjDirty = false;
     return this._viewProjMatrix;
   }
 
@@ -38,10 +42,12 @@ export class OrbitCamera {
   update(aspect: number) {
     this.updateAspect(aspect);
     this.updateView();
+    this._viewProjDirty = true;
   }
 
   updateAspect(aspect: number) {
     this._projMatrix = this._perspective(this.fov, aspect, this.near, this.far) as unknown as Float32Array;
+    this._viewProjDirty = true;
   }
 
   private _perspective(fovY: number, aspect: number, near: number, far: number) {
@@ -61,6 +67,7 @@ export class OrbitCamera {
       this.targetX, this.targetY, this.targetZ,
       0, 1, 0
     ) as unknown as Float32Array;
+    this._viewProjDirty = true;
   }
 
   private _lookAt(ex: number, ey: number, ez: number, cx: number, cy: number, cz: number, ux: number, uy: number, uz: number) {

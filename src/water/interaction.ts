@@ -1,11 +1,27 @@
 import { OrbitCamera } from '../camera/orbit.ts';
 
 export function setupInteraction(canvas: HTMLCanvasElement, camera: OrbitCamera, onHit: (x: number, z: number) => void) {
+  // A left-click drops a ripple; a left-drag orbits the camera. Distinguish by
+  // pointer travel: a press that releases within a few pixels is a click.
+  let downX = 0;
+  let downY = 0;
+  let downButton = -1;
+  const CLICK_SLOP = 5; // px
+
   canvas.addEventListener('pointerdown', (e: PointerEvent) => {
     if (e.button !== 0) return;
+    downX = e.clientX;
+    downY = e.clientY;
+    downButton = e.button;
+  });
+
+  canvas.addEventListener('pointerup', (e: PointerEvent) => {
+    if (e.button !== 0 || downButton !== 0) return;
+    const dx = e.clientX - downX;
+    const dy = e.clientY - downY;
+    if (dx * dx + dy * dy > CLICK_SLOP * CLICK_SLOP) return; // it was a drag
 
     const rect = canvas.getBoundingClientRect();
-
     const ndcX = ((e.clientX - rect.left) / rect.width) * 2 - 1;
     const ndcY = -((e.clientY - rect.top) / rect.height) * 2 + 1;
 
