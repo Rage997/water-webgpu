@@ -1,4 +1,5 @@
 import { OrbitCamera } from '../camera/orbit.ts';
+import { WATER_LEVEL } from '../types.ts';
 
 export function setupInteraction(canvas: HTMLCanvasElement, camera: OrbitCamera, onHit: (x: number, z: number) => void) {
   // A left-click drops a ripple; a left-drag orbits the camera. Distinguish by
@@ -44,9 +45,9 @@ export function setupInteraction(canvas: HTMLCanvasElement, camera: OrbitCamera,
     rayDir[1] /= len;
     rayDir[2] /= len;
 
-    // Intersect with plane Y=0
+    // Intersect with the water surface plane (Y = WATER_LEVEL).
     if (Math.abs(rayDir[1]) < 1e-6) return;
-    const t = -rayOrig[1] / rayDir[1];
+    const t = (WATER_LEVEL - rayOrig[1]) / rayDir[1];
     if (t < 0) return;
 
     const worldX = rayOrig[0] + t * rayDir[0];

@@ -51,6 +51,10 @@ export const MAX_DT = 30;
 export const MAX_ITERATED_DT = 100;
 export const MAX_Y = 40;
 export const SIGMA = 0.01;
+// Base water-surface level (world Y). Shared by the wave sim, the water
+// surface shader, and the caustic projection so they all agree on where the
+// water surface sits.
+export const WATER_LEVEL = 80.0;
 
 export interface ClickData {
   active: boolean;
