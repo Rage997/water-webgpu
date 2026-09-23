@@ -2,6 +2,7 @@ import { initWebGPU } from './wgpu/context.ts';
 import { OrbitCamera } from './camera/orbit.ts';
 import { WaterCompute } from './water/compute.ts';
 import { WaterRender } from './water/render.ts';
+import { Caustics } from './water/caustics.ts';
 import { Bathtub } from './scene/bathtub.ts';
 import { Floor } from './scene/floor.ts';
 import { Skybox } from './scene/skybox.ts';
@@ -13,6 +14,7 @@ declare global {
   interface Window {
     skyControl: Skybox;
     waterControl: WaterCompute;
+    causticsControl: Caustics;
   }
 }
 
@@ -31,6 +33,7 @@ async function main() {
   let grid = makeGrid(RESOLUTION_TIERS.high);
   let waterCompute = new WaterCompute(device, grid);
   let waterRender = new WaterRender(device, format, depthFormat, grid);
+  let caustics = new Caustics(device, grid);
 
   const bathtub = new Bathtub(device, format, depthFormat);
   const floor = new Floor(device, format, depthFormat);
@@ -49,6 +52,9 @@ async function main() {
   // Expose controls for UI and console
   window.skyControl = skybox;
   window.waterControl = waterCompute;
+  window.causticsControl = caustics;
+  bathtub.setCausticTexture(caustics.causticTexture);
+  (window as any).gpuDevice = device; // for the verification harness
 
   // Wire up UI controls
   const skyboxSelect = document.getElementById('skybox-select') as HTMLSelectElement;
@@ -66,6 +72,9 @@ async function main() {
   const ambientFrequencyValue = document.getElementById('ambient-frequency-value') as HTMLSpanElement;
   const ambientStrengthSlider = document.getElementById('ambient-strength') as HTMLInputElement;
   const ambientStrengthValue = document.getElementById('ambient-strength-value') as HTMLSpanElement;
+  const causticsToggle = document.getElementById('caustics-toggle') as HTMLInputElement;
+  const causticsIntensitySlider = document.getElementById('caustics-intensity') as HTMLInputElement;
+  const causticsIntensityValue = document.getElementById('caustics-intensity-value') as HTMLSpanElement;
 
   // Skybox selection
   skyboxSelect.addEventListener('change', async () => {
@@ -107,13 +116,17 @@ async function main() {
     waterCompute.rippleSize = prevCompute.rippleSize;
     waterCompute.ambientFrequency = prevCompute.ambientFrequency;
     waterCompute.ambientStrength = prevCompute.ambientStrength;
-
+    const prevCaustics = caustics;
     waterRender = new WaterRender(device, format, depthFormat, grid);
     waterRender.setSkyboxTexture(skybox.getTexture());
     waterRender.setStateBuffer(waterCompute.currentStateBuffer);
+    caustics = new Caustics(device, grid);
+    window.causticsControl = caustics;
+    bathtub.setCausticTexture(caustics.causticTexture);
 
     prevCompute.dispose();
     prevRender.dispose();
+    prevCaustics.dispose();
     window.waterControl = waterCompute;
   });
 
@@ -166,6 +179,24 @@ async function main() {
     ambientStrengthValue.textContent = value.toFixed(1);
   });
 
+  let causticStrength = causticsToggle.checked ? parseFloat(causticsIntensitySlider.value) : 0;
+
+  // Caustics toggle: enables/disables the caustic light on the tub bottom
+  causticsToggle.addEventListener('input', () => {
+    updateCausticStrength();
+  });
+
+  // Caustics intensity control
+  causticsIntensitySlider.addEventListener('input', () => {
+    causticsIntensityValue.textContent = parseFloat(causticsIntensitySlider.value).toFixed(1);
+    updateCausticStrength();
+  });
+
+  function updateCausticStrength() {
+    const slider = parseFloat(causticsIntensitySlider.value);
+    causticStrength = causticsToggle.checked ? slider : 0;
+  }
+
   let clickData: ClickData | null = null;
 
   setupInteraction(canvas, camera, (x: number, z: number) => {
@@ -193,11 +224,12 @@ async function main() {
 
     // Rebind state buffer if it swapped
     waterRender.setStateBuffer(waterCompute.currentStateBuffer);
+    caustics.update(commandEncoder, waterCompute.currentStateBuffer);
 
     // Update camera uniforms
     const vp = camera.viewProjMatrix;
     waterRender.updateCamera(vp, camera.eyeX, camera.eyeY, camera.eyeZ);
-    bathtub.updateCamera(vp);
+    bathtub.updateCamera(vp, causticStrength);
     floor.updateCamera(vp);
     skybox.updateCamera(camera.viewMatrix, camera.projMatrix);
     waterRender.updateTime(elapsedTime, skybox.intensity);

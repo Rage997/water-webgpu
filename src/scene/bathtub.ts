@@ -1,4 +1,5 @@
 import { W, H } from '../types.ts';
+import { CAUSTIC_NX, CAUSTIC_NZ } from '../water/caustics.ts';
 
 const TUB_VERT = `
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -6,6 +7,7 @@ const TUB_VERT = `
 struct Camera {
   viewProj: mat4x4f,
   eye: vec3f,
+  caustic: f32,
 };
 
 struct VertexInput {
@@ -33,8 +35,21 @@ fn main(input: VertexInput) -> VertexOutput {
 `;
 
 const TUB_FRAG = `
+@group(0) @binding(0) var<uniform> camera: Camera;
+
+struct Camera {
+  viewProj: mat4x4f,
+  eye: vec3f,
+  caustic: f32,
+};
+
 @group(0) @binding(1) var ourTexture: texture_2d<f32>;
 @group(0) @binding(2) var ourSampler: sampler;
+@group(0) @binding(3) var causticTexture: texture_2d<f32>;
+@group(0) @binding(4) var causticSampler: sampler;
+
+const CAUSTIC_HALF_X: f32 = ${CAUSTIC_NX / 2};
+const CAUSTIC_HALF_Z: f32 = ${CAUSTIC_NZ / 2};
 
 @fragment
 fn main(in: VertexOutput) -> @location(0) vec4f {
@@ -44,7 +59,13 @@ fn main(in: VertexOutput) -> @location(0) vec4f {
   let nDotL = max(dot(n, lightDir), 0.0);
   let ambient = 0.4;
   let lit = texColor * (ambient + nDotL * 0.6);
-  return vec4f(lit, 1.0);
+  // Caustics: only the bottom face (y == 0) receives them; the tub's vertical
+  // sides (y > 0) clamp to the map edge, which is outside the water and ~0.
+  let uv = vec2f((in.worldPos.x + CAUSTIC_HALF_X) / f32(${CAUSTIC_NX}),
+                 (in.worldPos.z + CAUSTIC_HALF_Z) / f32(${CAUSTIC_NZ}));
+  let caustic = textureSample(causticTexture, causticSampler, clamp(uv, vec2f(0.0), vec2f(1.0))).r;
+  let finalColor = lit + vec3f(1.0, 0.95, 0.8) * caustic * camera.caustic;
+  return vec4f(finalColor, 1.0);
 }
 
 struct VertexOutput {
@@ -101,6 +122,8 @@ export class Bathtub {
   bindGroup!: GPUBindGroup;
   texture!: GPUTexture;
   sampler!: GPUSampler;
+  causticTexture!: GPUTexture;
+  causticSampler!: GPUSampler;
   cameraBuffer!: GPUBuffer;
 
   private _device: GPUDevice;
@@ -182,6 +205,25 @@ export class Bathtub {
       minFilter: 'linear',
     });
 
+    // Caustic texture: a 1x1 zero fallback until the real one is set.
+    this.causticTexture = device.createTexture({
+      size: { width: 1, height: 1 },
+      format: 'r32float',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    device.queue.writeTexture(
+      { texture: this.causticTexture },
+      new Float32Array([0]),
+      { bytesPerRow: 4 },
+      { width: 1, height: 1 },
+    );
+    this.causticSampler = device.createSampler({
+      addressModeU: 'clamp-to-edge',
+      addressModeV: 'clamp-to-edge',
+      magFilter: 'nearest',
+      minFilter: 'nearest',
+    });
+
     // Create a fallback 1x1 white texture
     const whitePixel = new Uint8Array([255, 255, 255, 255]);
     device.queue.writeTexture(
@@ -202,6 +244,8 @@ export class Bathtub {
         { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
         { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: {} },
         { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+        { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
+        { binding: 4, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'non-filtering' } },
       ],
     });
 
@@ -238,6 +282,8 @@ export class Bathtub {
         { binding: 0, resource: { buffer: this.cameraBuffer } },
         { binding: 1, resource: this.texture.createView() },
         { binding: 2, resource: this.sampler },
+        { binding: 3, resource: this.causticTexture.createView() },
+        { binding: 4, resource: this.causticSampler },
       ],
     });
   }
@@ -271,14 +317,31 @@ export class Bathtub {
         { binding: 0, resource: { buffer: this.cameraBuffer } },
         { binding: 1, resource: this.texture.createView() },
         { binding: 2, resource: this.sampler },
+        { binding: 3, resource: this.causticTexture.createView() },
+        { binding: 4, resource: this.causticSampler },
       ],
     });
   }
 
-  updateCamera(viewProj: Float32Array) {
+  updateCamera(viewProj: Float32Array, caustic = 0) {
     const data = new Float32Array(20);
     data.set(viewProj, 0);
+    data[19] = caustic;
     this._device.queue.writeBuffer(this.cameraBuffer, 0, data);
+  }
+
+  setCausticTexture(texture: GPUTexture) {
+    this.causticTexture = texture;
+    this.bindGroup = this._device.createBindGroup({
+      layout: this.pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: this.cameraBuffer } },
+        { binding: 1, resource: this.texture.createView() },
+        { binding: 2, resource: this.sampler },
+        { binding: 3, resource: this.causticTexture.createView() },
+        { binding: 4, resource: this.causticSampler },
+      ],
+    });
   }
 
   render(pass: GPURenderPassEncoder) {

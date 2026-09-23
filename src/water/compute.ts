@@ -217,7 +217,9 @@ export class WaterCompute {
   ambientStrength = 2.0;    // Amplitude of ambient ripples
 
   private _device: GPUDevice;
+  private _grid: Grid;
   private _useA = true;
+  paused = false;             // when true, simulate() is skipped (debug/verification)
   // Base c2 value from constants
   private _baseC2 = C2;
   // 1/dx^2 + 1/dz^2, precomputed for the CFL dt clamp.
@@ -225,6 +227,7 @@ export class WaterCompute {
 
   constructor(device: GPUDevice, grid: Grid) {
     this._device = device;
+    this._grid = grid;
 
     this.workgroupX = Math.ceil(grid.NX / 8);
     this.workgroupZ = Math.ceil(grid.NZ / 8);
@@ -296,6 +299,39 @@ export class WaterCompute {
     return this._useA ? this.stateA : this.stateB;
   }
 
+  get grid(): Grid {
+    return this._grid;
+  }
+
+  // Zero both ping-pong state buffers (flat water). For verification.
+  zeroState() {
+    const zeros = new Float32Array(this._grid.NUM_VERTS * 2);
+    this._device.queue.writeBuffer(this.stateA, 0, zeros);
+    this._device.queue.writeBuffer(this.stateB, 0, zeros);
+  }
+
+  // Inject an analytic Gaussian height field into the current state buffer,
+  // mirroring the click shader's formula: h = amp * exp(-sigma * r^2).
+  // Both prev and cur are set so the field is static (no velocity).
+  // For verification of the gradient pass.
+  injectGaussian(x: number, z: number, amp: number, sigma: number) {
+    const g = this._grid;
+    const data = new Float32Array(g.NUM_VERTS * 2);
+    for (let iz = 0; iz < g.NZ; iz++) {
+      for (let ix = 0; ix < g.NX; ix++) {
+        const wx = -W / 2 + ix * g.DELTA_X;
+        const wz = -H / 2 + iz * g.DELTA_Z;
+        const dx = wx - x;
+        const dz = wz - z;
+        const h = amp * Math.exp(-sigma * (dx * dx + dz * dz));
+        const i = (iz * g.NX + ix) * 2;
+        data[i] = h;     // prev
+        data[i + 1] = h; // cur
+      }
+    }
+    this._device.queue.writeBuffer(this.currentStateBuffer, 0, data);
+  }
+
   dispose() {
     this.stateA.destroy();
     this.stateB.destroy();
@@ -305,6 +341,7 @@ export class WaterCompute {
   }
 
   simulate(commandEncoder: GPUCommandEncoder, rawDtMs: number, click: ClickData | null, elapsedTime: number) {
+    if (this.paused) return;
     // Map user-facing controls to physical params.
     const c2 = this._baseC2 * this.waveSpeed * this.waveSpeed;
     const gamma = MAX_GAMMA * this.damping * this.damping; // quadratic: fine low-end control
