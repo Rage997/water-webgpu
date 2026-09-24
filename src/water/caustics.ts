@@ -1,28 +1,17 @@
 import { W, H, WATER_LEVEL, type Grid } from '../types.ts';
-import { readBufferAsync } from '../utils/gpu-debug.ts';
+import { readBufferAsync, readTextureAsync } from '../utils/gpu-debug.ts';
 
-// Height-field water caustics (Yuksel & Keyser, "Fast Real-Time Caustics from
-// Height Fields", CGI 2009). Backward method: for each caustic-receiving ground
-// pixel, sum refracted radiance from a small rectangle on the water surface.
+// Yuksel & Keyser's unit-pixel footprint overlap model, with tiled receiver
+// gathers instead of a fixed 7x7 search window. Strong waves can move light
+// well outside that window. Bin actual ray landings, then sum all footprints
+// touching each receiver; no radius cutoff or per-frame energy normalization.
 //
-// Pipeline (each step verified against a CPU reference):
-//   1. gradient pass - central-difference gradient of the height field
-//   2. pass 1        - per ground pixel, 7 x-samples -> 7 y-neighbor intensities
-//   3. pass 2        - sum the 7 y-neighbor taps -> final caustic map
-//
-// Storage convention (clean, verified on CPU to match a brute-force 49-sample
-// sum to machine precision): pass 1 writes channel `j` (j in -3..3) to the
-// neighbor at row +j. Pass 2, for pixel P, sums channel (-d)+3 from the
-// neighbor at row +d (d in -3..3). This sidesteps the paper's confusing
-// channel-permutation pseudocode.
-//
-// The 7 channels are packed into two vec4f per caustic pixel:
-//   channels0 = (j=-3, j=-2, j=-1, j=0)
-//   channels1 = (j=1, j=2, j=3, 0)
+// Gradient -> refract/bin -> receiver gather. Each footprint touches at most
+// four tiles, so four linked-list nodes per source sample suffice without
+// overflow, a global allocator, or floating-point atomics.
 
-// Caustic map: one world unit per pixel, covering the tub bottom (W x H) plus
-// a margin so the map's edges (sampled by the tub's vertical sides) fall
-// outside the water and read ~0. Centered on the origin (the tub's center).
+// One world unit per caustic texel, centered on the tub's floor (Y=0).
+// The margin is receiver coverage, not a substitute for wall caustics.
 export const CAUSTIC_MARGIN = 10;
 export const CAUSTIC_NX = W + 2 * CAUSTIC_MARGIN;
 export const CAUSTIC_NZ = H + 2 * CAUSTIC_MARGIN;
@@ -51,8 +40,19 @@ const DFLAT = (() => {
 const SLOPE_X = DFLAT[0] / DFLAT[1];
 const SLOPE_Z = DFLAT[2] / DFLAT[1];
 
-// Central-difference gradient of the height field, with clamped (edge) indices
-// so boundary cells get a one-sided gradient instead of reading out of bounds.
+const TILE_SIZE = 8;
+const TILES_X = Math.ceil(CAUSTIC_NX / TILE_SIZE);
+const TILES_Z = Math.ceil(CAUSTIC_NZ / TILE_SIZE);
+// Preserve the paper's illumination-center lattice, but cover the entire
+// finite water surface rather than the receiver-centered search rectangle.
+const OFFSET_X = WATER_LEVEL * Number(SLOPE_X.toFixed(6));
+const OFFSET_Z = WATER_LEVEL * Number(SLOPE_Z.toFixed(6));
+const SOURCE_X = Math.floor(-W / 2 - 0.5 - OFFSET_X) + 1;
+const SOURCE_Z = Math.floor(-H / 2 - 0.5 - OFFSET_Z) + 1;
+const SOURCE_NX = Math.ceil(W / 2 + 0.5 - OFFSET_X) - SOURCE_X;
+const SOURCE_NZ = Math.ceil(H / 2 + 0.5 - OFFSET_Z) - SOURCE_Z;
+
+// Central differences inside the grid; one-sided differences at its boundary.
 // Reads the height from the state buffer's .y component.
 function makeGradientShader(nx: number, nz: number, dx: number, dz: number) {
   return `
@@ -70,22 +70,21 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let dx = ${dx.toFixed(6)};
   let dz = ${dz.toFixed(6)};
 
-  // Clamped neighbor indices (edge cells reuse themselves -> one-sided gradient).
+  // Boundary derivatives use the actual distance between available neighbors.
   let iL = iz * nx + max(0, ix - 1);
   let iR = iz * nx + min(nx - 1, ix + 1);
   let iD = max(0, iz - 1) * nx + ix;
   let iU = min(nz - 1, iz + 1) * nx + ix;
 
   grad[iz * nx + ix] = vec2f(
-    (state[iR].y - state[iL].y) / (2.0 * dx),
-    (state[iU].y - state[iD].y) / (2.0 * dz),
+    (state[iR].y - state[iL].y) / (f32(min(nx - 1, ix + 1) - max(0, ix - 1)) * dx),
+    (state[iU].y - state[iD].y) / (f32(min(nz - 1, iz + 1) - max(0, iz - 1)) * dz),
   );
 }
 `;
 }
 
-// Shared WGSL helpers: bilinear sampling of the height/gradient fields (in
-// world space) and the light-refraction setup. Inlined into both passes.
+// Bilinear sampling in world space and refraction constants for the bin pass.
 function makeCommonWgsl(nx: number, nz: number, dx: number, dz: number) {
   return `
 const NX: i32 = ${nx};
@@ -95,11 +94,9 @@ const DZ: f32 = ${dz.toFixed(6)};
 const W_HALF: f32 = ${W / 2};
 const H_HALF: f32 = ${H / 2};
 const WATER_LEVEL: f32 = ${WATER_LEVEL};
-const S: f32 = 1.0; // caustic pixel size (world units)
 const H0: f32 = WATER_LEVEL; // rest depth above the ground plane (y=0)
 const ETA: f32 = ${ETA.toFixed(6)}; // n_air / n_water
 const L: vec3f = normalize(vec3f(${LX.toFixed(6)}, ${LY.toFixed(6)}, ${LZ.toFixed(6)})); // toward the light
-const DFLAT: vec3f = vec3f(${DFLAT[0].toFixed(6)}, ${DFLAT[1].toFixed(6)}, ${DFLAT[2].toFixed(6)}); // refracted direction for flat water (precomputed)
 const SLOPE: vec2f = vec2f(${SLOPE_X.toFixed(6)}, ${SLOPE_Z.toFixed(6)}); // dflat.xz / dflat.y (precomputed)
 
 // Bilinear sample of the height field at world (wx, wz).
@@ -135,87 +132,78 @@ fn sampleGrad(wx: f32, wz: f32) -> vec2f {
 `;
 }
 
-// Pass 1: for each caustic pixel, 7 x-samples -> 7 y-neighbor intensities.
-// Writes two vec4f (channels j=-3..0 and j=1..3) per caustic pixel.
-function makePass1Shader(nx: number, nz: number, dx: number, dz: number) {
+function makeBinShader(nx: number, nz: number, dx: number, dz: number) {
   return `
+struct Link { sample: u32, next: u32 };
 @group(0) @binding(0) var<storage, read> state: array<vec2f>;
 @group(0) @binding(1) var<storage, read> grad: array<vec2f>;
-@group(0) @binding(2) var<storage, read_write> channels0: array<vec4f>;
-@group(0) @binding(3) var<storage, read_write> channels1: array<vec4f>;
+@group(0) @binding(2) var<storage, read_write> landings: array<vec4f>;
+@group(0) @binding(3) var<storage, read_write> heads: array<atomic<u32>>;
+@group(0) @binding(4) var<storage, read_write> links: array<Link>;
 ${makeCommonWgsl(nx, nz, dx, dz)}
 
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) id: vec3u) {
-  let i = i32(id.x);
-  let j = i32(id.y);
-  if (i >= ${CAUSTIC_NX} || j >= ${CAUSTIC_NZ}) { return; }
-
-  let X = f32(i) - f32(${CAUSTIC_NX / 2});
-  let Z = f32(j) - f32(${CAUSTIC_NZ / 2});
-
-  // Illumination center: where a flat surface would focus the light.
-  let PC = vec2f(X, Z) + H0 * SLOPE;
-
-  var ch = array<f32, 8>();
-  for (var k = -3; k <= 3; k++) {
-    let sx = PC.x + f32(k) * S;
-    let sz = PC.y;
-    let h = sampleHeight(sx, sz);
-    let g = sampleGrad(sx, sz);
-    let N = normalize(vec3f(-g.x, 1.0, -g.y));
-    let d = refract(-L, N, ETA);
-    if (d.y >= 0.0) { continue; } // no downward component (total internal reflection)
-    let t = (WATER_LEVEL + h) / (-d.y);
-    let ix = sx + d.x * t;
-    let iz = sz + d.z * t;
-    let ax = max(0.0, 1.0 - abs(X - ix) / S);
-    for (var jj = -3; jj <= 3; jj++) {
-      let rowZ = Z + f32(jj) * S;
-      let ay = max(0.0, 1.0 - abs(rowZ - iz) / S);
-      ch[jj + 3] += ax * ay;
+  if (id.x >= ${SOURCE_NX}u || id.y >= ${SOURCE_NZ}u) { return; }
+  let sampleIndex = id.x + id.y * ${SOURCE_NX}u;
+  let source = vec2f(f32(id.x) + ${SOURCE_X}.0, f32(id.y) + ${SOURCE_Z}.0) + H0 * SLOPE;
+  // Boundary patches carry only the portion of their area inside the water.
+  let extent = max(vec2f(0.0),
+    min(source + vec2f(0.5), vec2f(W_HALF, H_HALF)) -
+    max(source - vec2f(0.5), -vec2f(W_HALF, H_HALF)));
+  let weight = extent.x * extent.y;
+  if (weight <= 0.0) { return; }
+  let h = sampleHeight(source.x, source.y);
+  let g = sampleGrad(source.x, source.y);
+  let normal = normalize(vec3f(-g.x, 1.0, -g.y));
+  let direction = refract(-L, normal, ETA);
+  if (direction.y >= 0.0 || WATER_LEVEL + h <= 0.0) { return; }
+  let distance = (WATER_LEVEL + h) / -direction.y;
+  let q = source + direction.xz * distance + vec2f(${CAUSTIC_NX / 2}.0, ${CAUSTIC_NZ / 2}.0);
+  // A unit footprint contributes only to floor(q) and floor(q)+1 per axis.
+  // Reject off-map rays before converting potentially distant coordinates.
+  if (q.x <= -1.0 || q.y <= -1.0 || q.x >= ${CAUSTIC_NX}.0 || q.y >= ${CAUSTIC_NZ}.0) { return; }
+  landings[sampleIndex] = vec4f(q, weight, 0.0);
+  let pixel = vec2i(floor(q));
+  let firstTile = max(pixel, vec2i(0)) / ${TILE_SIZE};
+  let lastTile = min(pixel + vec2i(1), vec2i(${CAUSTIC_NX - 1}, ${CAUSTIC_NZ - 1})) / ${TILE_SIZE};
+  var slot = 0u;
+  for (var ty = firstTile.y; ty <= lastTile.y; ty++) {
+    for (var tx = firstTile.x; tx <= lastTile.x; tx++) {
+      let node = sampleIndex * 4u + slot;
+      let previous = atomicExchange(&heads[u32(tx + ty * ${TILES_X})], node + 1u);
+      links[node] = Link(sampleIndex, previous);
+      slot++;
     }
   }
-  channels0[i + j * ${CAUSTIC_NX}] = vec4f(ch[0], ch[1], ch[2], ch[3]);
-  channels1[i + j * ${CAUSTIC_NX}] = vec4f(ch[4], ch[5], ch[6], 0.0);
 }
 `;
 }
 
-// Pass 2: for each caustic pixel, sum the 7 y-neighbor taps -> final caustic map.
-function makePass2Shader() {
+function makeGatherShader() {
   return `
-@group(0) @binding(0) var<storage, read> channels0: array<vec4f>;
-@group(0) @binding(1) var<storage, read> channels1: array<vec4f>;
-@group(0) @binding(2) var caustic: texture_storage_2d<r32float, write>;
+struct Link { sample: u32, next: u32 };
+@group(0) @binding(0) var<storage, read> landings: array<vec4f>;
+@group(0) @binding(1) var<storage, read> heads: array<u32>;
+@group(0) @binding(2) var<storage, read> links: array<Link>;
+@group(0) @binding(3) var caustic: texture_storage_2d<r32float, write>;
 
-@compute @workgroup_size(8, 8)
+@compute @workgroup_size(${TILE_SIZE}, ${TILE_SIZE})
 fn main(@builtin(global_invocation_id) id: vec3u) {
-  let i = i32(id.x);
-  let j = i32(id.y);
-  if (i >= ${CAUSTIC_NX} || j >= ${CAUSTIC_NZ}) { return; }
-
-  var val = 0.0;
-  for (var d = -3; d <= 3; d++) {
-    let row = clamp(j + d, 0, ${CAUSTIC_NZ} - 1);
-    let c0 = channels0[i + row * ${CAUSTIC_NX}];
-    let c1 = channels1[i + row * ${CAUSTIC_NX}];
-    // channel for jj = -d: index (-d)+3 (0..6)
-    let idx = (-d) + 3;
-    var w = 0.0;
-    switch idx {
-      case 0: { w = c0.x; }
-      case 1: { w = c0.y; }
-      case 2: { w = c0.z; }
-      case 3: { w = c0.w; }
-      case 4: { w = c1.x; }
-      case 5: { w = c1.y; }
-      case 6: { w = c1.z; }
-      default: {}
-    }
-    val += w;
+  if (id.x >= ${CAUSTIC_NX}u || id.y >= ${CAUSTIC_NZ}u) { return; }
+  let tile = id.xy / ${TILE_SIZE}u;
+  var entry = heads[tile.x + tile.y * ${TILES_X}u];
+  var intensity = 0.0;
+  // Binning and gathering are separate passes: all links/landings are visible.
+  // Each sample appears at most once in a tile's list.
+  while (entry != 0u) {
+    let link = links[entry - 1u];
+    let landing = landings[link.sample];
+    let overlap = max(vec2f(0.0), vec2f(1.0) - abs(vec2f(id.xy) - landing.xy));
+    intensity += overlap.x * overlap.y * landing.z;
+    entry = link.next;
   }
-  textureStore(caustic, vec2i(i, j), vec4f(val));
+  textureStore(caustic, vec2i(id.xy), vec4f(intensity));
 }
 `;
 }
@@ -223,29 +211,40 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 export class Caustics {
   private _device: GPUDevice;
   private _grid: Grid;
-  private _workgroupX: number;
-  private _workgroupZ: number;
   private _gradientPipeline: GPUComputePipeline;
   private _gradientBuffer: GPUBuffer;
-  private _gradientBindGroup: GPUBindGroup | null = null;
-  private _stateBuffer: GPUBuffer | null = null;
-  private _channel0Buffer: GPUBuffer;
-  private _channel1Buffer: GPUBuffer;
+  private _landingBuffer: GPUBuffer;
+  private _headBuffer: GPUBuffer;
+  private _linkBuffer: GPUBuffer;
   private _causticTexture: GPUTexture;
-  private _pass1Pipeline: GPUComputePipeline;
-  private _pass2Pipeline: GPUComputePipeline;
-  private _pass1BindGroup: GPUBindGroup | null = null;
-  private _pass2BindGroup: GPUBindGroup;
+  private _binPipeline: GPUComputePipeline;
+  private _gatherPipeline: GPUComputePipeline;
+  private _gatherBindGroup: GPUBindGroup;
+  private _stateBindings = new Map<GPUBuffer, { gradient: GPUBindGroup; bin: GPUBindGroup }>();
 
   constructor(device: GPUDevice, grid: Grid) {
     this._device = device;
     this._grid = grid;
-    this._workgroupX = Math.ceil(grid.NX / 8);
-    this._workgroupZ = Math.ceil(grid.NZ / 8);
-
     this._gradientBuffer = device.createBuffer({
-      size: grid.NUM_VERTS * 8, // vec2f (dh/dx, dh/dz) per sim cell
+      size: grid.NUM_VERTS * 8,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+    this._landingBuffer = device.createBuffer({
+      size: SOURCE_NX * SOURCE_NZ * 16,
+      usage: GPUBufferUsage.STORAGE,
+    });
+    this._headBuffer = device.createBuffer({
+      size: TILES_X * TILES_Z * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    this._linkBuffer = device.createBuffer({
+      size: SOURCE_NX * SOURCE_NZ * 4 * 8,
+      usage: GPUBufferUsage.STORAGE,
+    });
+    this._causticTexture = device.createTexture({
+      size: { width: CAUSTIC_NX, height: CAUSTIC_NZ },
+      format: 'r32float',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC,
     });
     this._gradientPipeline = device.createComputePipeline({
       layout: 'auto',
@@ -256,45 +255,29 @@ export class Caustics {
         entryPoint: 'main',
       },
     });
-
-    const cn = CAUSTIC_NX * CAUSTIC_NZ;
-    this._channel0Buffer = device.createBuffer({
-      size: cn * 16, // vec4f per caustic pixel (channels j=-3..0)
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
-    });
-    this._channel1Buffer = device.createBuffer({
-      size: cn * 16, // vec4f per caustic pixel (channels j=1..3)
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
-    });
-    this._causticTexture = device.createTexture({
-      size: { width: CAUSTIC_NX, height: CAUSTIC_NZ },
-      format: 'r32float',
-      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC,
-    });
-    this._pass1Pipeline = device.createComputePipeline({
+    this._binPipeline = device.createComputePipeline({
       layout: 'auto',
       compute: {
         module: device.createShaderModule({
-          code: makePass1Shader(grid.NX, grid.NZ, grid.DELTA_X, grid.DELTA_Z),
+          code: makeBinShader(grid.NX, grid.NZ, grid.DELTA_X, grid.DELTA_Z),
         }),
         entryPoint: 'main',
       },
     });
-    this._pass2Pipeline = device.createComputePipeline({
+    this._gatherPipeline = device.createComputePipeline({
       layout: 'auto',
       compute: {
-        module: device.createShaderModule({
-          code: makePass2Shader(),
-        }),
+        module: device.createShaderModule({ code: makeGatherShader() }),
         entryPoint: 'main',
       },
     });
-    this._pass2BindGroup = this._device.createBindGroup({
-      layout: this._pass2Pipeline.getBindGroupLayout(0),
+    this._gatherBindGroup = device.createBindGroup({
+      layout: this._gatherPipeline.getBindGroupLayout(0),
       entries: [
-        { binding: 0, resource: { buffer: this._channel0Buffer } },
-        { binding: 1, resource: { buffer: this._channel1Buffer } },
-        { binding: 2, resource: this._causticTexture.createView() },
+        { binding: 0, resource: { buffer: this._landingBuffer } },
+        { binding: 1, resource: { buffer: this._headBuffer } },
+        { binding: 2, resource: { buffer: this._linkBuffer } },
+        { binding: 3, resource: this._causticTexture.createView() },
       ],
     });
   }
@@ -311,78 +294,63 @@ export class Caustics {
     return this._causticTexture;
   }
 
-  // Run the full pipeline: gradient -> pass 1 -> pass 2. The bind groups are
-  // rebuilt only when the state buffer changes (it ping-pongs).
   update(encoder: GPUCommandEncoder, stateBuffer: GPUBuffer) {
-    if (stateBuffer !== this._stateBuffer) {
-      this._stateBuffer = stateBuffer;
-      this._gradientBindGroup = this._device.createBindGroup({
-        layout: this._gradientPipeline.getBindGroupLayout(0),
-        entries: [
-          { binding: 0, resource: { buffer: stateBuffer } },
-          { binding: 1, resource: { buffer: this._gradientBuffer } },
-        ],
-      });
-      this._pass1BindGroup = this._device.createBindGroup({
-        layout: this._pass1Pipeline.getBindGroupLayout(0),
-        entries: [
-          { binding: 0, resource: { buffer: stateBuffer } },
-          { binding: 1, resource: { buffer: this._gradientBuffer } },
-          { binding: 2, resource: { buffer: this._channel0Buffer } },
-          { binding: 3, resource: { buffer: this._channel1Buffer } },
-        ],
-      });
+    let bindings = this._stateBindings.get(stateBuffer);
+    if (!bindings) {
+      bindings = {
+        gradient: this._device.createBindGroup({
+          layout: this._gradientPipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: stateBuffer } },
+            { binding: 1, resource: { buffer: this._gradientBuffer } },
+          ],
+        }),
+        bin: this._device.createBindGroup({
+          layout: this._binPipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: stateBuffer } },
+            { binding: 1, resource: { buffer: this._gradientBuffer } },
+            { binding: 2, resource: { buffer: this._landingBuffer } },
+            { binding: 3, resource: { buffer: this._headBuffer } },
+            { binding: 4, resource: { buffer: this._linkBuffer } },
+          ],
+        }),
+      };
+      this._stateBindings.set(stateBuffer, bindings);
     }
-    // Pass 1: gradient (central differences)
+    // Zero is the empty-list sentinel; stale nodes become unreachable.
+    encoder.clearBuffer(this._headBuffer);
     let pass = encoder.beginComputePass();
     pass.setPipeline(this._gradientPipeline);
-    pass.setBindGroup(0, this._gradientBindGroup!);
-    pass.dispatchWorkgroups(this._workgroupX, this._workgroupZ);
+    pass.setBindGroup(0, bindings.gradient);
+    pass.dispatchWorkgroups(Math.ceil(this._grid.NX / 8), Math.ceil(this._grid.NZ / 8));
     pass.end();
-    // Pass 2: 7 x-samples -> 7 y-neighbor channels
     pass = encoder.beginComputePass();
-    pass.setPipeline(this._pass1Pipeline);
-    pass.setBindGroup(0, this._pass1BindGroup!);
-    pass.dispatchWorkgroups(Math.ceil(CAUSTIC_NX / 8), Math.ceil(CAUSTIC_NZ / 8));
+    pass.setPipeline(this._binPipeline);
+    pass.setBindGroup(0, bindings.bin);
+    pass.dispatchWorkgroups(Math.ceil(SOURCE_NX / 8), Math.ceil(SOURCE_NZ / 8));
     pass.end();
-    // Pass 3: sum 7 y-neighbor taps -> caustic map
     pass = encoder.beginComputePass();
-    pass.setPipeline(this._pass2Pipeline);
-    pass.setBindGroup(0, this._pass2BindGroup);
-    pass.dispatchWorkgroups(Math.ceil(CAUSTIC_NX / 8), Math.ceil(CAUSTIC_NZ / 8));
+    pass.setPipeline(this._gatherPipeline);
+    pass.setBindGroup(0, this._gatherBindGroup);
+    pass.dispatchWorkgroups(TILES_X, TILES_Z);
     pass.end();
   }
 
-  // Read the gradient buffer back to the CPU (for verification).
   async readGradientAsync(): Promise<Float32Array> {
     return readBufferAsync(this._device, this._gradientBuffer);
   }
 
-  // Read the caustic map back to the CPU (for verification).
   async readCausticAsync(): Promise<Float32Array> {
-    const dev = this._device;
-    const buf = dev.createBuffer({
-      size: CAUSTIC_NX * CAUSTIC_NZ * 4,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-    });
-    const enc = dev.createCommandEncoder();
-    enc.copyTextureToBuffer(
-      { texture: this._causticTexture },
-      { buffer: buf },
-      { width: CAUSTIC_NX, height: CAUSTIC_NZ },
-    );
-    dev.queue.submit([enc.finish()]);
-    await buf.mapAsync(GPUMapMode.READ);
-    const out = new Float32Array(buf.getMappedRange().slice(0));
-    buf.unmap();
-    buf.destroy();
-    return out;
+    return readTextureAsync(this._device, this._causticTexture, CAUSTIC_NX, CAUSTIC_NZ);
   }
 
   dispose() {
+    this._stateBindings.clear();
     this._gradientBuffer.destroy();
-    this._channel0Buffer.destroy();
-    this._channel1Buffer.destroy();
+    this._landingBuffer.destroy();
+    this._headBuffer.destroy();
+    this._linkBuffer.destroy();
     this._causticTexture.destroy();
   }
 }

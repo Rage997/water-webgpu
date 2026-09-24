@@ -58,13 +58,17 @@ fn main(in: VertexOutput) -> @location(0) vec4f {
   let n = normalize(in.normal);
   let nDotL = max(dot(n, lightDir), 0.0);
   let ambient = 0.4;
-  let lit = texColor * (ambient + nDotL * 0.6);
-  // Caustics: only the bottom face (y == 0) receives them; the tub's vertical
-  // sides (y > 0) clamp to the map edge, which is outside the water and ~0.
-  let uv = vec2f((in.worldPos.x + CAUSTIC_HALF_X) / f32(${CAUSTIC_NX}),
-                 (in.worldPos.z + CAUSTIC_HALF_Z) / f32(${CAUSTIC_NZ}));
-  let caustic = textureSample(causticTexture, causticSampler, clamp(uv, vec2f(0.0), vec2f(1.0))).r;
-  let finalColor = lit + vec3f(1.0, 0.95, 0.8) * caustic * camera.caustic;
+  // The caustic map describes the Y=0 receiver, not the vertical walls.
+  var directScale = 1.0;
+  if (n.y > 0.5 && abs(in.worldPos.y) < 0.001) {
+    let uv = vec2f((in.worldPos.x + CAUSTIC_HALF_X + 0.5) / f32(${CAUSTIC_NX}),
+                   (in.worldPos.z + CAUSTIC_HALF_Z + 0.5) / f32(${CAUSTIC_NZ}));
+    let caustic = textureSampleLevel(causticTexture, causticSampler, uv, 0.0).r;
+    // Strength 0 disables redistribution; 1 uses the measured irradiance.
+    // Higher artistic contrast may extinguish direct light, never ambient.
+    directScale = max(0.0, 1.0 + camera.caustic * (caustic - 1.0));
+  }
+  let finalColor = texColor * (ambient + nDotL * 0.6 * directScale);
   return vec4f(finalColor, 1.0);
 }
 
