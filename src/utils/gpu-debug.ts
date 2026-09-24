@@ -45,8 +45,8 @@ export async function readBufferAsync(device: GPUDevice, buffer: GPUBuffer): Pro
   return data;
 }
 
-// Copy an r32float GPUTexture's contents to the CPU and resolve. Used to read
-// back the caustic map (and the pass-1 channel texture) for verification.
+// Copy an r32float GPUTexture's contents to the CPU and resolve.
+// Used to read back the caustic map for verification.
 // Handles the row-pitch padding WebGPU adds to copy destinations.
 export async function readTextureAsync(
   device: GPUDevice,
