@@ -29,6 +29,7 @@ npm run preview
 ## Architecture
 
 - `src/water/` - Water simulation (compute + render)
+- `src/water/caustics.ts` / `caustic-footprints.ts` - Caustics
 - `src/scene/` - 3D scene components (skybox, bathtub, floor)
 - `src/camera/` - Orbit camera controls
 - `src/wgpu/` - WebGPU context management
@@ -42,8 +43,7 @@ The skymap was taken from [polyhaven](https://polyhaven.com/hdris/skies)
 
 1. **Dispersion** - Frequency-dependent wave speed for more realistic propagation
 2. **Refraction** - Scene distortion through water surface
-3. **Caustics** - Light patterns on bathtub floor
-4. **Foam/spray** - Particle effects at wave peaks
+3. **Foam/spray** - Particle effects at wave peaks
 
 ## License
 

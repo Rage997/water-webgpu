@@ -1,3 +1,19 @@
+// Caustics send each refracted ray to the first valid bathtub face it reaches:
+// the bottom or one of the four walls. Each face has its own local map.
+// Submerged faces use transmitted direct light; ambient light is unchanged.
+// Strength 0 keeps ordinary direct lighting, 1 uses the computed caustics,
+// and values above 1 increase contrast. There is no frame normalization or
+// peak clamp. Rays that leave above the rim contribute to no receiver.
+
+// Each unit water cell becomes two source triangles. We refract their vertices
+// and project the triangles onto the receiver faces. This preserves the actual
+// footprint shape and area, especially where wall projections stretch at
+// grazing angles; it is not a fixed one-pixel deposit.
+// Footprints crossing a seam split their source area between the faces.
+// Triangle/texel overlap is integrated analytically and accumulated with
+// float32 atomics. Collapsed footprints use line/point limits instead of being
+// dropped.
+
 import { W, H, WATER_LEVEL, type Grid } from '../types.ts';
 import { readBufferAsync, readTextureAsync } from '../utils/gpu-debug.ts';
 import { CAUSTIC_RECEIVERS, type CausticFace, type CausticTextures } from './receivers.ts';
