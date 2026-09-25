@@ -53,7 +53,7 @@ async function main() {
   window.skyControl = skybox;
   window.waterControl = waterCompute;
   window.causticsControl = caustics;
-  bathtub.setCausticTexture(caustics.causticTexture);
+  bathtub.setCausticTextures(caustics.causticTextures);
   (window as any).gpuDevice = device; // for the verification harness
 
   // Wire up UI controls
@@ -122,7 +122,7 @@ async function main() {
     waterRender.setStateBuffer(waterCompute.currentStateBuffer);
     caustics = new Caustics(device, grid);
     window.causticsControl = caustics;
-    bathtub.setCausticTexture(caustics.causticTexture);
+    bathtub.setCausticTextures(caustics.causticTextures);
 
     prevCompute.dispose();
     prevRender.dispose();
@@ -181,7 +181,6 @@ async function main() {
 
   let causticStrength = causticsToggle.checked ? parseFloat(causticsIntensitySlider.value) : 0;
 
-  // Caustics toggle: enables/disables the caustic light on the tub bottom
   causticsToggle.addEventListener('input', () => {
     updateCausticStrength();
   });

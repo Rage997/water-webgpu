@@ -1,5 +1,5 @@
-import { W, H } from '../types.ts';
-import { CAUSTIC_NX, CAUSTIC_NZ } from '../water/caustics.ts';
+import { WATER_LEVEL } from '../types.ts';
+import { CAUSTIC_RECEIVERS, TUB_WIDTH, TUB_DEPTH, TUB_HEIGHT, type CausticTextures } from '../water/receivers.ts';
 
 const TUB_VERT = `
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -45,11 +45,13 @@ struct Camera {
 
 @group(0) @binding(1) var ourTexture: texture_2d<f32>;
 @group(0) @binding(2) var ourSampler: sampler;
-@group(0) @binding(3) var causticTexture: texture_2d<f32>;
-@group(0) @binding(4) var causticSampler: sampler;
+${CAUSTIC_RECEIVERS.map((receiver, face) => `@group(0) @binding(${3 + face}) var ${receiver.name}Caustic: texture_2d<f32>;`).join('\n')}
+@group(0) @binding(8) var causticSampler: sampler;
 
-const CAUSTIC_HALF_X: f32 = ${CAUSTIC_NX / 2};
-const CAUSTIC_HALF_Z: f32 = ${CAUSTIC_NZ / 2};
+const TUB_WIDTH: f32 = ${TUB_WIDTH};
+const TUB_DEPTH: f32 = ${TUB_DEPTH};
+const TUB_HEIGHT: f32 = ${TUB_HEIGHT};
+const WATER_LEVEL: f32 = ${WATER_LEVEL};
 
 @fragment
 fn main(in: VertexOutput) -> @location(0) vec4f {
@@ -58,17 +60,35 @@ fn main(in: VertexOutput) -> @location(0) vec4f {
   let n = normalize(in.normal);
   let nDotL = max(dot(n, lightDir), 0.0);
   let ambient = 0.4;
-  // The caustic map describes the Y=0 receiver, not the vertical walls.
-  var directScale = 1.0;
-  if (n.y > 0.5 && abs(in.worldPos.y) < 0.001) {
-    let uv = vec2f((in.worldPos.x + CAUSTIC_HALF_X + 0.5) / f32(${CAUSTIC_NX}),
-                   (in.worldPos.z + CAUSTIC_HALF_Z + 0.5) / f32(${CAUSTIC_NZ}));
-    let caustic = textureSampleLevel(causticTexture, causticSampler, uv, 0.0).r;
-    // Strength 0 disables redistribution; 1 uses the measured irradiance.
-    // Higher artistic contrast may extinguish direct light, never ambient.
-    directScale = max(0.0, 1.0 + camera.caustic * (caustic - 1.0));
+  var direct = 0.6 * nDotL;
+  if (in.worldPos.y < WATER_LEVEL) { // underwater caustics only; above-water light is ordinary
+    var intensity = 0.0;
+    // q = physical face coordinate - 0.5; normalized UV = (q + 0.5) / size.
+    // Each face has its own map: wall coordinates use height, never floor XZ.
+    if (n.y > 0.5) {
+      let uv = (in.worldPos.xz + vec2f(TUB_WIDTH, TUB_DEPTH) * 0.5) / vec2f(TUB_WIDTH, TUB_DEPTH);
+      intensity = textureSampleLevel(bottomCaustic, causticSampler, uv, 0.0).r;
+    } else if (abs(n.x) > 0.5) {
+      let uv = vec2f(in.worldPos.z + TUB_DEPTH * 0.5, in.worldPos.y) / vec2f(TUB_DEPTH, TUB_HEIGHT);
+      if (n.x > 0.0) {
+        intensity = textureSampleLevel(leftCaustic, causticSampler, uv, 0.0).r;
+      } else {
+        intensity = textureSampleLevel(rightCaustic, causticSampler, uv, 0.0).r;
+      }
+    } else {
+      let uv = vec2f(in.worldPos.x + TUB_WIDTH * 0.5, in.worldPos.y) / vec2f(TUB_WIDTH, TUB_HEIGHT);
+      if (n.z > 0.0) {
+        intensity = textureSampleLevel(frontCaustic, causticSampler, uv, 0.0).r;
+      } else {
+        intensity = textureSampleLevel(backCaustic, causticSampler, uv, 0.0).r;
+      }
+    }
+    // Maps already measure receiver irradiance; a wall cosine would count it twice.
+    let transmitted = 0.6 * lightDir.y * intensity;
+    // Strength 0 preserves ordinary light; 1 uses irradiance. Only direct may vanish.
+    direct = max(0.0, direct + camera.caustic * (transmitted - direct));
   }
-  let finalColor = texColor * (ambient + nDotL * 0.6 * directScale);
+  let finalColor = texColor * (ambient + direct);
   return vec4f(finalColor, 1.0);
 }
 
@@ -126,7 +146,8 @@ export class Bathtub {
   bindGroup!: GPUBindGroup;
   texture!: GPUTexture;
   sampler!: GPUSampler;
-  causticTexture!: GPUTexture;
+  private _causticTextures: CausticTextures;
+  private _fallbackCausticTextures: CausticTextures | null;
   causticSampler!: GPUSampler;
   cameraBuffer!: GPUBuffer;
 
@@ -135,21 +156,21 @@ export class Bathtub {
   constructor(device: GPUDevice, format: GPUTextureFormat, depthFormat: GPUTextureFormat) {
     this._device = device;
 
-    const tubW = W + 4;
-    const tubD = H + 4;
-    const wallH = 100;
+    const tubW = TUB_WIDTH;
+    const tubD = TUB_DEPTH;
+    const wallH = TUB_HEIGHT;
 
     // 5 sides: bottom, 2 short sides (front/back), 2 long sides (left/right)
     const sides: BoxSide[] = [
       // Bottom: Y=0, normal (0,1,0), tangent along X and Z
       makeBoxSide(0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, -1, tubW, tubD, 3, 6),
-      // Short side front: Z=-H/2, normal (0,0,1), facing forward
+      // Short side front: Z=-tubD/2, normal (0,0,1), facing forward
       makeBoxSide(0, wallH/2, -tubD/2, 0, 0, 1, 1, 0, 0, 0, 1, 0, tubW, wallH, 3, 1),
-      // Short side back: Z=H/2, normal (0,0,-1)
+      // Short side back: Z=tubD/2, normal (0,0,-1)
       makeBoxSide(0, wallH/2, tubD/2, 0, 0, -1, -1, 0, 0, 0, 1, 0, tubW, wallH, 3, 1),
-      // Long side left: X=-W/2, normal (1,0,0)
+      // Long side left: X=-tubW/2, normal (1,0,0)
       makeBoxSide(-tubW/2, wallH/2, 0, 1, 0, 0, 0, 0, -1, 0, 1, 0, tubD, wallH, 6, 1),
-      // Long side right: X=W/2, normal (-1,0,0)
+      // Long side right: X=tubW/2, normal (-1,0,0)
       makeBoxSide(tubW/2, wallH/2, 0, -1, 0, 0, 0, 0, 1, 0, 1, 0, tubD, wallH, 6, 1),
     ];
 
@@ -209,18 +230,25 @@ export class Bathtub {
       minFilter: 'linear',
     });
 
-    // Caustic texture: a 1x1 zero fallback until the real one is set.
-    this.causticTexture = device.createTexture({
-      size: { width: 1, height: 1 },
-      format: 'r32float',
-      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-    });
-    device.queue.writeTexture(
-      { texture: this.causticTexture },
-      new Float32Array([0]),
-      { bytesPerRow: 4 },
-      { width: 1, height: 1 },
-    );
+    // Owned zero-irradiance fallbacks keep ambient light until maps are supplied.
+    const createFallback = () => {
+      const texture = device.createTexture({
+        size: { width: 1, height: 1 },
+        format: 'r32float',
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+      });
+      device.queue.writeTexture(
+        { texture },
+        new Float32Array([0]),
+        { bytesPerRow: 4 },
+        { width: 1, height: 1 },
+      );
+      return texture;
+    };
+    this._fallbackCausticTextures = [
+      createFallback(), createFallback(), createFallback(), createFallback(), createFallback(),
+    ];
+    this._causticTextures = this._fallbackCausticTextures;
     this.causticSampler = device.createSampler({
       addressModeU: 'clamp-to-edge',
       addressModeV: 'clamp-to-edge',
@@ -248,8 +276,12 @@ export class Bathtub {
         { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
         { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: {} },
         { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
-        { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
-        { binding: 4, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'non-filtering' } },
+        ...CAUSTIC_RECEIVERS.map<GPUBindGroupLayoutEntry>((_, face) => ({
+          binding: 3 + face,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: 'unfilterable-float', viewDimension: '2d' },
+        })),
+        { binding: 8, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'non-filtering' } },
       ],
     });
 
@@ -280,16 +312,7 @@ export class Bathtub {
       },
     });
 
-    this.bindGroup = device.createBindGroup({
-      layout: bindGroupLayout,
-      entries: [
-        { binding: 0, resource: { buffer: this.cameraBuffer } },
-        { binding: 1, resource: this.texture.createView() },
-        { binding: 2, resource: this.sampler },
-        { binding: 3, resource: this.causticTexture.createView() },
-        { binding: 4, resource: this.causticSampler },
-      ],
-    });
+    this._rebuildBindGroup();
   }
 
   private async _loadTexture(url: string) {
@@ -315,16 +338,7 @@ export class Bathtub {
     this.texture.destroy();
     this.texture = newTexture;
 
-    this.bindGroup = device.createBindGroup({
-      layout: this.pipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: this.cameraBuffer } },
-        { binding: 1, resource: this.texture.createView() },
-        { binding: 2, resource: this.sampler },
-        { binding: 3, resource: this.causticTexture.createView() },
-        { binding: 4, resource: this.causticSampler },
-      ],
-    });
+    this._rebuildBindGroup();
   }
 
   updateCamera(viewProj: Float32Array, caustic = 0) {
@@ -334,16 +348,28 @@ export class Bathtub {
     this._device.queue.writeBuffer(this.cameraBuffer, 0, data);
   }
 
-  setCausticTexture(texture: GPUTexture) {
-    this.causticTexture = texture;
+  setCausticTextures(textures: CausticTextures) {
+    this._causticTextures = textures;
+    this._rebuildBindGroup();
+    // Supplied maps belong to the simulation; only release our original fallbacks.
+    if (this._fallbackCausticTextures) {
+      for (const texture of this._fallbackCausticTextures) texture.destroy();
+      this._fallbackCausticTextures = null;
+    }
+  }
+
+  private _rebuildBindGroup() {
     this.bindGroup = this._device.createBindGroup({
       layout: this.pipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: this.cameraBuffer } },
         { binding: 1, resource: this.texture.createView() },
         { binding: 2, resource: this.sampler },
-        { binding: 3, resource: this.causticTexture.createView() },
-        { binding: 4, resource: this.causticSampler },
+        ...this._causticTextures.map((texture, face) => ({
+          binding: 3 + face,
+          resource: texture.createView(),
+        })),
+        { binding: 8, resource: this.causticSampler },
       ],
     });
   }

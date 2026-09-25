@@ -1,0 +1,143 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Caustic footprint regression</title>
+<pre id="output">Running WebGPU footprint regressions…</pre>
+<script type="module">
+import { Caustics } from '../src/water/caustics.ts';
+import { W, H, WATER_LEVEL, makeGrid } from '../src/types.ts';
+import { CAUSTIC_RECEIVERS, TUB_WIDTH, TUB_DEPTH } from '../src/water/receivers.ts';
+
+// Run with Vite at /water-webgpu/tests/caustic-footprints.html.
+// No screenshot/source assertions: check measured irradiance and accepted power.
+const output = document.querySelector('#output');
+const results = [];
+const assert = (condition, message) => { if (!condition) throw new Error(message); };
+const light = [0.2, 0.8, 0.3];
+const length = Math.hypot(...light);
+const eta = 1 / 1.333;
+const direction = [-eta * light[0] / length,
+  -Math.sqrt(1 - eta * eta * (1 - (light[1] / length) ** 2)),
+  -eta * light[2] / length];
+
+// Independent double-precision polygon clipping for a parallel, flat beam.
+function clip(polygon, axis, bound, sign) {
+  const result = [];
+  for (let i = 0; i < polygon.length; i++) {
+    const a = polygon[i], b = polygon[(i + 1) % polygon.length];
+    const da = sign * (a[axis] - bound), db = sign * (b[axis] - bound);
+    if (da >= 0) result.push(a);
+    if ((da >= 0) !== (db >= 0)) {
+      const t = da / (da - db);
+      result.push(a.map((v, j) => v + t * (b[j] - v)));
+    }
+  }
+  return result;
+}
+function flatPower(height) {
+  return CAUSTIC_RECEIVERS.map((r, face) => {
+    const axis = face === 0 ? 1 : face <= 2 ? 0 : 2;
+    const plane = [0, -TUB_WIDTH / 2, TUB_WIDTH / 2, -TUB_DEPTH / 2, TUB_DEPTH / 2][face];
+    if ((plane - (axis === 1 ? height : 0)) / direction[axis] <= 0) return 0;
+    let polygon = [[-W / 2, -H / 2], [W / 2, -H / 2], [W / 2, H / 2], [-W / 2, H / 2]].map(([x, z]) => {
+      const origin = [x, height, z];
+      const distance = (plane - origin[axis]) / direction[axis];
+      const p = origin.map((v, i) => v + distance * direction[i]);
+      return face === 0 ? [p[0] + TUB_WIDTH / 2, p[2] + TUB_DEPTH / 2]
+        : face <= 2 ? [p[2] + TUB_DEPTH / 2, p[1]] : [p[0] + TUB_WIDTH / 2, p[1]];
+    });
+    polygon = clip(clip(clip(clip(polygon, 0, 0, 1), 0, r.width, -1), 1, 0, 1), 1, r.height, -1);
+    let area = 0;
+    for (let i = 0; i < polygon.length; i++) {
+      const a = polygon[i], b = polygon[(i + 1) % polygon.length];
+      area += a[0] * b[1] - a[1] * b[0];
+    }
+    return Math.abs(area) * 0.5 * Math.abs(direction[axis] / direction[1]);
+  });
+}
+function flatInteriorError(map, face) {
+  if (face === 2 || face === 4) {
+    let maximum = 0;
+    for (const value of map) maximum = Math.max(maximum, value);
+    return maximum;
+  }
+  const r = CAUSTIC_RECEIVERS[face];
+  const expected = face === 0 ? 1 : Math.abs(direction[face === 1 ? 0 : 2] / direction[1]);
+  let error = 0;
+  for (let y = 3; y < r.height - 3; y++) for (let x = 3; x < r.width - 3; x++) {
+    const p = face === 0 ? [x + 0.5 - TUB_WIDTH / 2, 0, y + 0.5 - TUB_DEPTH / 2]
+      : face === 1 ? [-TUB_WIDTH / 2, y + 0.5, x + 0.5 - TUB_DEPTH / 2]
+        : [x + 0.5 - TUB_WIDTH / 2, y + 0.5, -TUB_DEPTH / 2];
+    const distance = (p[1] - WATER_LEVEL) / direction[1];
+    const sx = p[0] - distance * direction[0], sz = p[2] - distance * direction[2];
+    if (distance > 0 && Math.abs(sx) < W / 2 - 2 && Math.abs(sz) < H / 2 - 2) {
+      error = Math.max(error, Math.abs(map[x + y * r.width] - expected));
+    }
+  }
+  return error;
+}
+
+window.causticRegression = (async () => {
+  const adapter = await navigator.gpu?.requestAdapter();
+  assert(adapter, 'WebGPU adapter required');
+  const device = await adapter.requestDevice();
+  const errors = [];
+  device.addEventListener('uncapturederror', event => errors.push(event.error.message));
+  try {
+    for (const resolution of [60, 300]) {
+      device.pushErrorScope('validation');
+      const grid = makeGrid(resolution), caustics = new Caustics(device, grid);
+      const state = device.createBuffer({ size: grid.NUM_VERTS * 8, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+      try {
+        for (const field of ['flat', 'waves', 'corner', 'flat', 'raised']) {
+          const data = new Float32Array(grid.NUM_VERTS * 2);
+          for (let z = 0; z < grid.NZ; z++) for (let x = 0; x < grid.NX; x++) {
+            const wx = x * grid.DELTA_X - W / 2, wz = z * grid.DELTA_Z - H / 2;
+            const height = field === 'waves' ? 6 * (Math.cos(wx * 2 * Math.PI / 80 + 0.3) + 0.6 * Math.cos(wz * 2 * Math.PI / 120 + 0.7))
+              : field === 'corner' ? 15 * Math.exp(-0.01 * ((wx + W / 2 - 5) ** 2 + (wz + H / 2 - 5) ** 2))
+                : field === 'raised' ? 40 : 0;
+            data[(x + z * grid.NX) * 2] = data[(x + z * grid.NX) * 2 + 1] = height;
+          }
+          device.queue.writeBuffer(state, 0, data);
+          const encoder = device.createCommandEncoder();
+          caustics.update(encoder, state);
+          device.queue.submit([encoder.finish()]);
+          const maps = await Promise.all(CAUSTIC_RECEIVERS.map((_, face) => caustics.readCausticAsync(face)));
+          const powers = maps.map(map => {
+            let sum = 0;
+            for (const value of map) {
+              assert(Number.isFinite(value) && value >= 0, `${field}: invalid irradiance`);
+              sum += value;
+            }
+            return sum;
+          });
+          const total = powers.reduce((sum, value) => sum + value, 0);
+          const expected = field === 'raised' ? flatPower(WATER_LEVEL + 40) : flatPower(WATER_LEVEL);
+          const expectedTotal = field === 'raised' ? expected.reduce((sum, value) => sum + value, 0) : W * H;
+          assert(Math.abs(total - expectedTotal) < 0.2, `${field}: lost/duplicated power ${total} vs ${expectedTotal}`);
+          if (field === 'flat' || field === 'raised') {
+            powers.forEach((power, face) => assert(Math.abs(power - expected[face]) < 0.1, `${field}: incorrect face ${face} allocation`));
+          }
+          if (field === 'flat') {
+            maps.forEach((map, face) => assert(flatInteriorError(map, face) < 0.0002, `Flat face ${face}: sampling bands or wrong footprint density`));
+          }
+          results.push({ resolution, field, total, powers });
+          output.textContent = JSON.stringify(results, null, 2);
+        }
+      } finally {
+        caustics.dispose();
+        state.destroy();
+      }
+      const validation = await device.popErrorScope();
+      assert(!validation, validation?.message);
+    }
+    assert(errors.length === 0, errors.join('\n'));
+    output.textContent = 'PASS\n' + JSON.stringify(results, null, 2);
+    return { passed: true, results };
+  } finally {
+    device.destroy();
+  }
+})().catch(error => {
+  output.textContent = 'FAIL\n' + error.stack;
+  return { passed: false, error: error.message, results };
+});
+</script>
