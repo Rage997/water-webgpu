@@ -6,6 +6,7 @@ import { Caustics } from './water/caustics.ts';
 import { Bathtub } from './scene/bathtub.ts';
 import { Floor } from './scene/floor.ts';
 import { Skybox } from './scene/skybox.ts';
+import { Rain } from './scene/rain.ts';
 import { setupInteraction } from './water/interaction.ts';
 import { makeGrid, RESOLUTION_TIERS } from './types.ts';
 import type { ClickData, ResolutionTier } from './types.ts';
@@ -38,6 +39,7 @@ async function main() {
   const bathtub = new Bathtub(device, format, depthFormat);
   const floor = new Floor(device, format, depthFormat);
   const skybox = new Skybox(device, format, depthFormat);
+  const rain = new Rain(device, format, depthFormat);
 
   // Hide initial loading panel when skybox is ready
   const loadingPanel = document.getElementById('loading-panel') as HTMLDivElement;
@@ -68,13 +70,36 @@ async function main() {
   const rippleAmplitudeValue = document.getElementById('ripple-amplitude-value') as HTMLSpanElement;
   const rippleSizeSlider = document.getElementById('ripple-size') as HTMLInputElement;
   const rippleSizeValue = document.getElementById('ripple-size-value') as HTMLSpanElement;
-  const ambientFrequencySlider = document.getElementById('ambient-frequency') as HTMLInputElement;
-  const ambientFrequencyValue = document.getElementById('ambient-frequency-value') as HTMLSpanElement;
-  const ambientStrengthSlider = document.getElementById('ambient-strength') as HTMLInputElement;
-  const ambientStrengthValue = document.getElementById('ambient-strength-value') as HTMLSpanElement;
   const causticsToggle = document.getElementById('caustics-toggle') as HTMLInputElement;
   const causticsIntensitySlider = document.getElementById('caustics-intensity') as HTMLInputElement;
   const causticsIntensityValue = document.getElementById('caustics-intensity-value') as HTMLSpanElement;
+  const rainToggle = document.getElementById('rain-toggle') as HTMLInputElement;
+  rain.enabled = rainToggle.checked;
+  rainToggle.addEventListener('input', () => {
+    rain.enabled = rainToggle.checked;
+  });
+
+  const rainStrengthSlider = document.getElementById('rain-strength') as HTMLInputElement;
+  const rainStrengthValue = document.getElementById('rain-strength-value') as HTMLSpanElement;
+  const rainSizeSlider = document.getElementById('rain-size') as HTMLInputElement;
+  const rainSizeValue = document.getElementById('rain-size-value') as HTMLSpanElement;
+  const rainVarietySlider = document.getElementById('rain-variety') as HTMLInputElement;
+  const rainVarietyValue = document.getElementById('rain-variety-value') as HTMLSpanElement;
+  rain.strength = parseFloat(rainStrengthSlider.value);
+  rain.size = parseFloat(rainSizeSlider.value);
+  rain.variety = parseFloat(rainVarietySlider.value);
+  rainStrengthSlider.addEventListener('input', () => {
+    rain.strength = parseFloat(rainStrengthSlider.value);
+    rainStrengthValue.textContent = rain.strength.toFixed(0);
+  });
+  rainSizeSlider.addEventListener('input', () => {
+    rain.size = parseFloat(rainSizeSlider.value);
+    rainSizeValue.textContent = rain.size.toFixed(1);
+  });
+  rainVarietySlider.addEventListener('input', () => {
+    rain.variety = parseFloat(rainVarietySlider.value);
+    rainVarietyValue.textContent = rain.variety.toFixed(2);
+  });
 
   // Skybox selection
   skyboxSelect.addEventListener('change', async () => {
@@ -114,8 +139,6 @@ async function main() {
     waterCompute.damping = prevCompute.damping;
     waterCompute.rippleAmplitude = prevCompute.rippleAmplitude;
     waterCompute.rippleSize = prevCompute.rippleSize;
-    waterCompute.ambientFrequency = prevCompute.ambientFrequency;
-    waterCompute.ambientStrength = prevCompute.ambientStrength;
     const prevCaustics = caustics;
     waterRender = new WaterRender(device, format, depthFormat, grid);
     waterRender.setSkyboxTexture(skybox.getTexture());
@@ -165,20 +188,6 @@ async function main() {
     rippleSizeValue.textContent = value.toFixed(1);
   });
 
-  // Ambient wave frequency control
-  ambientFrequencySlider.addEventListener('input', () => {
-    const value = parseFloat(ambientFrequencySlider.value);
-    waterCompute.ambientFrequency = value;
-    ambientFrequencyValue.textContent = value.toFixed(2);
-  });
-
-  // Ambient wave strength control
-  ambientStrengthSlider.addEventListener('input', () => {
-    const value = parseFloat(ambientStrengthSlider.value);
-    waterCompute.ambientStrength = value;
-    ambientStrengthValue.textContent = value.toFixed(1);
-  });
-
   let causticStrength = causticsToggle.checked ? parseFloat(causticsIntensitySlider.value) : 0;
 
   causticsToggle.addEventListener('input', () => {
@@ -216,9 +225,10 @@ async function main() {
     camera.update(aspect);
 
     const commandEncoder = device.createCommandEncoder();
+    rain.update(commandEncoder, rawDt, waterCompute.currentStateBuffer, grid, camera.viewProjMatrix, waterCompute.paused);
 
     // Simulate water
-    waterCompute.simulate(commandEncoder, rawDt, clickData, elapsedTime);
+    waterCompute.simulate(commandEncoder, rawDt, clickData);
     if (clickData) clickData = null;
 
     // Rebind state buffer if it swapped
@@ -253,6 +263,7 @@ async function main() {
     bathtub.render(renderPass);
     floor.render(renderPass);
     waterRender.render(renderPass);
+    rain.render(renderPass);
 
     renderPass.end();
 

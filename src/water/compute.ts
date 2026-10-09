@@ -61,91 +61,6 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 }
 `;
 
-// Ambient wave shader: continuously injects small random ripples
-function makeAmbientWaveShader(nx: number, nz: number, w: number, h: number) {
-  const dx = w / (nx - 1);
-  const dz = h / (nz - 1);
-  return `
-@group(0) @binding(0) var<storage, read_write> state: array<vec2f>;
-@group(0) @binding(1) var<uniform> ambient: AmbientParams;
-
-struct AmbientParams {
-  time: f32,          // Current time in seconds for randomness
-  frequency: f32,     // How often to spawn ripples (0-1, where 1 = very frequent)
-  strength: f32,      // Amplitude of ambient ripples (typically 1-5)
-  sigma: f32,         // Gaussian spread (reuse SIGMA constant)
-};
-
-// Hash-based pseudo-random function (returns 0-1)
-fn random(seed: vec2f) -> f32 {
-  return fract(sin(dot(seed, vec2f(12.9898, 78.233))) * 43758.5453);
-}
-
-// Gaussian disturbance function
-fn gaussian2D(dx: f32, dz: f32, sigma: f32) -> f32 {
-  let r2 = dx * dx + dz * dz;
-  return exp(-r2 / (2.0 * sigma * sigma));
-}
-
-@compute @workgroup_size(8, 8)
-fn main(@builtin(global_invocation_id) id: vec3u) {
-  let ix = i32(id.x);
-  let iz = i32(id.y);
-  let nx = ${nx};
-  let nz = ${nz};
-
-  if (ix >= nx || iz >= nz) { return; }
-
-  let i = iz * nx + ix;
-  
-  // Skip if no ambient waves enabled
-  if (ambient.strength <= 0.0 || ambient.frequency <= 0.0) {
-    return;
-  }
-  
-  // Generate multiple potential ripple centers based on time
-  // Use frequency to determine how many ripples to check
-  let numRipples = i32(ambient.frequency * 5.0) + 1;
-  
-  var totalDisplacement = 0.0;
-  
-  for (var r = 0; r < numRipples; r++) {
-    // Generate pseudo-random ripple position using time and ripple index
-    let seed = vec2f(ambient.time * 0.7 + f32(r) * 123.456, f32(r) * 78.9);
-    let randX = random(seed);
-    let randZ = random(seed + vec2f(1.0, 0.0));
-    
-    // Map random position to grid coordinates
-    let rippleX = randX * ${w.toFixed(1)};
-    let rippleZ = randZ * ${h.toFixed(1)};
-    
-    // Current vertex world position
-    let dx = ${dx.toFixed(6)};
-    let dz = ${dz.toFixed(6)};
-    let vertX = f32(ix) * dx;
-    let vertZ = f32(iz) * dz;
-    
-    // Distance from this vertex to the ripple center
-    let distX = vertX - rippleX;
-    let distZ = vertZ - rippleZ;
-    
-    // Add Gaussian displacement (much smaller than click ripples)
-    let displacement = gaussian2D(distX, distZ, ambient.sigma) * ambient.strength;
-    
-    // Fade in/out over time for each ripple (so they don't last forever)
-    let rippleAge = fract(ambient.time * 0.3 + f32(r) * 0.17);
-    let fade = sin(rippleAge * 3.14159) * 0.5; // Pulse each ripple
-    
-    totalDisplacement += displacement * fade;
-  }
-  
-  // Apply the ambient displacement to the current height
-  let current = state[i];
-  state[i] = vec2f(current.x, current.y + totalDisplacement);
-}
-`;
-}
-
 function makeClickShader(nx: number, nz: number, dx: number, dz: number) {
   // The grid is centered at world origin, spanning [-W/2, W/2] in X and [-H/2, H/2] in Z.
   // Grid vertex (ix, iz) maps to world space as:
@@ -193,18 +108,14 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 export class WaterCompute {
   pipeline!: GPUComputePipeline;
   clickPipeline!: GPUComputePipeline;
-  ambientPipeline!: GPUComputePipeline;
   stateA!: GPUBuffer;
   stateB!: GPUBuffer;
   paramsBuffer!: GPUBuffer;
   clickBuffer!: GPUBuffer;
-  ambientBuffer!: GPUBuffer;
   bindGroup!: GPUBindGroup;
   clickBindGroup!: GPUBindGroup;
-  ambientBindGroup!: GPUBindGroup;
   paramsArray: Float32Array;
   clickArray: Float32Array;
-  ambientArray: Float32Array;
   workgroupX: number;
   workgroupZ: number;
 
@@ -213,8 +124,6 @@ export class WaterCompute {
   damping = 0.2;            // 0..1 wave decay (mapped to a stable drag rate)
   rippleAmplitude = MAX_Y;  // click splash height (world units)
   rippleSize = 1.0;         // click splash width multiplier
-  ambientFrequency = 0.3;   // 0-1, how often ambient ripples spawn
-  ambientStrength = 2.0;    // Amplitude of ambient ripples
 
   private _device: GPUDevice;
   private _grid: Grid;
@@ -235,7 +144,6 @@ export class WaterCompute {
 
     this.paramsArray = new Float32Array([0, C2, DAMPING, grid.NX, grid.NZ, grid.DELTA_X2, grid.DELTA_Z2, 0]);
     this.clickArray = new Float32Array([0, 0, 0, MAX_Y, SIGMA]);
-    this.ambientArray = new Float32Array([0, 0.3, 2.0, SIGMA * 400]); // time, frequency, strength, sigma
 
     this.stateA = device.createBuffer({
       size: grid.NUM_VERTS * 8,
@@ -263,11 +171,6 @@ export class WaterCompute {
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
-    this.ambientBuffer = device.createBuffer({
-      size: 16, // 4 floats: time, frequency, strength, sigma
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
-
     this.pipeline = device.createComputePipeline({
       layout: 'auto',
       compute: {
@@ -280,14 +183,6 @@ export class WaterCompute {
       layout: 'auto',
       compute: {
         module: device.createShaderModule({ code: makeClickShader(grid.NX, grid.NZ, grid.DELTA_X, grid.DELTA_Z) }),
-        entryPoint: 'main',
-      },
-    });
-
-    this.ambientPipeline = device.createComputePipeline({
-      layout: 'auto',
-      compute: {
-        module: device.createShaderModule({ code: makeAmbientWaveShader(grid.NX, grid.NZ, W, H) }),
         entryPoint: 'main',
       },
     });
@@ -337,10 +232,9 @@ export class WaterCompute {
     this.stateB.destroy();
     this.paramsBuffer.destroy();
     this.clickBuffer.destroy();
-    this.ambientBuffer.destroy();
   }
 
-  simulate(commandEncoder: GPUCommandEncoder, rawDtMs: number, click: ClickData | null, elapsedTime: number) {
+  simulate(commandEncoder: GPUCommandEncoder, rawDtMs: number, click: ClickData | null) {
     if (this.paused) return;
     // Map user-facing controls to physical params.
     const c2 = this._baseC2 * this.waveSpeed * this.waveSpeed;
@@ -369,20 +263,6 @@ export class WaterCompute {
       pass.end();
 
       this.clickArray[0] = 0;
-    }
-
-    // Apply ambient waves before the main simulation
-    this.ambientArray[0] = elapsedTime;
-    this.ambientArray[1] = this.ambientFrequency;
-    this.ambientArray[2] = this.ambientStrength;
-    this._device.queue.writeBuffer(this.ambientBuffer, 0, this.ambientArray);
-
-    if (this.ambientStrength > 0 && this.ambientFrequency > 0) {
-      const ambientPass = commandEncoder.beginComputePass();
-      ambientPass.setPipeline(this.ambientPipeline);
-      ambientPass.setBindGroup(0, this.ambientBindGroup);
-      ambientPass.dispatchWorkgroups(this.workgroupX, this.workgroupZ);
-      ambientPass.end();
     }
 
     // Upload physical params for this frame.
@@ -420,14 +300,6 @@ export class WaterCompute {
       entries: [
         { binding: 0, resource: { buffer: this._useA ? this.stateA : this.stateB } },
         { binding: 1, resource: { buffer: this.clickBuffer } },
-      ],
-    });
-
-    this.ambientBindGroup = this._device.createBindGroup({
-      layout: this.ambientPipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: this._useA ? this.stateA : this.stateB } },
-        { binding: 1, resource: { buffer: this.ambientBuffer } },
       ],
     });
   }
