@@ -15,7 +15,7 @@ export class OrbitCamera {
   private _projMatrix: Float32Array = new Float32Array(16);
   private _viewProjMatrix: Float32Array = new Float32Array(16);
 
-  private _isDragging = false;
+  private _dragPointer: number | null = null;
   private _prevMouseX = 0;
   private _prevMouseY = 0;
 
@@ -87,22 +87,40 @@ export class OrbitCamera {
 
   attach(canvas: HTMLCanvasElement) {
     canvas.addEventListener('pointerdown', (e) => {
-      this._isDragging = true;
+      if (e.button !== 2 || this._dragPointer !== null) return;
+      this._dragPointer = e.pointerId;
       this._prevMouseX = e.clientX;
       this._prevMouseY = e.clientY;
       canvas.setPointerCapture(e.pointerId);
     });
 
     canvas.addEventListener('pointermove', (e) => {
-      if (!this._isDragging) return;
+      if (e.pointerId !== this._dragPointer) return;
+      if ((e.buttons & 2) === 0) {
+        stop(e);
+        return;
+      }
       this.theta -= (e.clientX - this._prevMouseX) * 0.005;
       this.phi = Math.max(0.1, Math.min(Math.PI - 0.1, this.phi + (e.clientY - this._prevMouseY) * 0.005));
       this._prevMouseX = e.clientX;
       this._prevMouseY = e.clientY;
     });
 
-    canvas.addEventListener('pointerup', () => { this._isDragging = false; });
-    canvas.addEventListener('pointercancel', () => { this._isDragging = false; });
+    const stop = (e: PointerEvent) => {
+      if (e.pointerId !== this._dragPointer) return;
+      this._dragPointer = null;
+      if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
+    };
+    canvas.addEventListener('pointerup', stop);
+    canvas.addEventListener('pointercancel', stop);
+    canvas.addEventListener('lostpointercapture', stop);
+    window.addEventListener('blur', () => {
+      if (this._dragPointer !== null && canvas.hasPointerCapture(this._dragPointer)) {
+        canvas.releasePointerCapture(this._dragPointer);
+      }
+      this._dragPointer = null;
+    });
+    canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
     canvas.addEventListener('wheel', (e) => {
       e.preventDefault();

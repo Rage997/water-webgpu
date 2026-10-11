@@ -1,33 +1,49 @@
 import { OrbitCamera } from '../camera/orbit.ts';
-import { WATER_LEVEL } from '../types.ts';
+import { W, H, WATER_LEVEL } from '../types.ts';
 
 export function setupInteraction(canvas: HTMLCanvasElement, camera: OrbitCamera, onHit: (x: number, z: number) => void) {
-  // A left-click drops a ripple; a left-drag orbits the camera. Distinguish by
-  // pointer travel: a press that releases within a few pixels is a click.
-  let downX = 0;
-  let downY = 0;
-  let downButton = -1;
-  const CLICK_SLOP = 5; // px
+  let pointerId: number | null = null;
+  const invViewProj = new Float32Array(16);
 
   canvas.addEventListener('pointerdown', (e: PointerEvent) => {
-    if (e.button !== 0) return;
-    downX = e.clientX;
-    downY = e.clientY;
-    downButton = e.button;
+    if (e.button !== 0 || pointerId !== null) return;
+    pointerId = e.pointerId;
+    canvas.setPointerCapture(e.pointerId);
+    disturb(e);
   });
 
-  canvas.addEventListener('pointerup', (e: PointerEvent) => {
-    if (e.button !== 0 || downButton !== 0) return;
-    const dx = e.clientX - downX;
-    const dy = e.clientY - downY;
-    if (dx * dx + dy * dy > CLICK_SLOP * CLICK_SLOP) return; // it was a drag
+  canvas.addEventListener('pointermove', (e: PointerEvent) => {
+    if (e.pointerId !== pointerId) return;
+    if ((e.buttons & 1) === 0) {
+      stop(e);
+      return;
+    }
+    disturb(e);
+  });
+  canvas.addEventListener('pointerup', stop);
+  canvas.addEventListener('pointercancel', stop);
+  canvas.addEventListener('lostpointercapture', stop);
+  window.addEventListener('blur', () => {
+    if (pointerId !== null && canvas.hasPointerCapture(pointerId)) {
+      canvas.releasePointerCapture(pointerId);
+    }
+    pointerId = null;
+  });
 
+  function stop(e: PointerEvent) {
+    if (e.pointerId !== pointerId) return;
+    pointerId = null;
+    if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
+  }
+
+  function disturb(e: PointerEvent) {
     const rect = canvas.getBoundingClientRect();
     const ndcX = ((e.clientX - rect.left) / rect.width) * 2 - 1;
     const ndcY = -((e.clientY - rect.top) / rect.height) * 2 + 1;
 
     // Unproject: compute ray in world space
-    const invViewProj = new Float32Array(16);
+    if (e.clientX < rect.left || e.clientX > rect.right ||
+        e.clientY < rect.top || e.clientY > rect.bottom) return;
     camera.invViewProjMatrix(invViewProj);
 
     // Near point (NDC z = 0) and far point (NDC z = 1) in world space
@@ -53,8 +69,10 @@ export function setupInteraction(canvas: HTMLCanvasElement, camera: OrbitCamera,
     const worldX = rayOrig[0] + t * rayDir[0];
     const worldZ = rayOrig[2] + t * rayDir[2];
 
-    onHit(worldX, worldZ);
-  });
+    if (Math.abs(worldX) <= W / 2 && Math.abs(worldZ) <= H / 2) {
+      onHit(worldX, worldZ);
+    }
+  }
 }
 
 function transformPoint(mat: Float32Array, x: number, y: number, z: number): number[] {

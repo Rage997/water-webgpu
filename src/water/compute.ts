@@ -87,7 +87,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let nx = ${nx}u;
   let nz = ${nz}u;
 
-  if (ix >= i32(nx) || iz >= i32(nz)) { return; }
+  if (ix <= 0 || iz <= 0 || ix >= i32(nx) - 1 || iz >= i32(nz) - 1) { return; }
 
   let i = iz * i32(nx) + ix;
 
@@ -97,10 +97,15 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 
   let dx = wx - click.x;
   let dz = wz - click.z;
-  let bump = click.max_y * exp(-click.sigma * (dx * dx + dz * dz));
-
-  state[i].x += bump;
-  state[i].y += bump;
+  let radius2 = dx * dx + dz * dz;
+  if (click.sigma * radius2 > 9.0) { return; }
+  // A shallow pressure brush, not an additive splash on every pointer event.
+  // Repeated samples at the same location cannot stack height indefinitely.
+  let targetHeight = -0.2 * click.max_y * exp(-click.sigma * radius2);
+  let displacement = min(0.0, targetHeight - state[i].y);
+  // Move both time levels equally to preserve the existing wave velocity.
+  state[i].x += displacement;
+  state[i].y += displacement;
 }
 `;
 }
@@ -122,8 +127,8 @@ export class WaterCompute {
   // Public parameters for UI control (user-facing; mapped to physics in simulate()).
   waveSpeed = 1.0;          // propagation speed multiplier (c2 = baseC2 * waveSpeed^2)
   damping = 0.2;            // 0..1 wave decay (mapped to a stable drag rate)
-  rippleAmplitude = MAX_Y;  // click splash height (world units)
-  rippleSize = 1.0;         // click splash width multiplier
+  rippleAmplitude = MAX_Y;  // pointer brush strength; depth = 0.2 * amplitude
+  rippleSize = 2.0;         // pointer brush width multiplier
 
   private _device: GPUDevice;
   private _grid: Grid;
@@ -206,7 +211,7 @@ export class WaterCompute {
   }
 
   // Inject an analytic Gaussian height field into the current state buffer,
-  // mirroring the click shader's formula: h = amp * exp(-sigma * r^2).
+  // using h = amp * exp(-sigma * r^2).
   // Both prev and cur are set so the field is static (no velocity).
   // For verification of the gradient pass.
   injectGaussian(x: number, z: number, amp: number, sigma: number) {
