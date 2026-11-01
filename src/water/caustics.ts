@@ -38,7 +38,7 @@ const LX = LIGHT_DIR[0], LY = LIGHT_DIR[1], LZ = LIGHT_DIR[2];
 // n_air / n_water (eta in the refract formula).
 const ETA = 1 / 1.333;
 
-// Central differences inside the grid; one-sided differences at its boundary.
+// Central differences with mirrored neighbors at rigid pool walls.
 // Reads the height from the state buffer's .y component.
 function makeGradientShader(nx: number, nz: number, dx: number, dz: number) {
   return `
@@ -56,15 +56,14 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let dx = ${dx.toFixed(6)};
   let dz = ${dz.toFixed(6)};
 
-  // Boundary derivatives use the actual distance between available neighbors.
-  let iL = iz * nx + max(0, ix - 1);
-  let iR = iz * nx + min(nx - 1, ix + 1);
-  let iD = max(0, iz - 1) * nx + ix;
-  let iU = min(nz - 1, iz + 1) * nx + ix;
+  let iL = iz * nx + abs(ix - 1);
+  let iR = iz * nx + min(ix + 1, 2 * (nx - 1) - ix - 1);
+  let iD = abs(iz - 1) * nx + ix;
+  let iU = min(iz + 1, 2 * (nz - 1) - iz - 1) * nx + ix;
 
   grad[iz * nx + ix] = vec2f(
-    (state[iR].y - state[iL].y) / (f32(min(nx - 1, ix + 1) - max(0, ix - 1)) * dx),
-    (state[iU].y - state[iD].y) / (f32(min(nz - 1, iz + 1) - max(0, iz - 1)) * dz),
+    (state[iR].y - state[iL].y) / (2.0 * dx),
+    (state[iU].y - state[iD].y) / (2.0 * dz),
   );
 }
 `;

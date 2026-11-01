@@ -8,7 +8,7 @@ import { Floor } from './scene/floor.ts';
 import { Skybox } from './scene/skybox.ts';
 import { Rain } from './scene/rain.ts';
 import { setupInteraction } from './water/interaction.ts';
-import { makeGrid, RESOLUTION_TIERS } from './types.ts';
+import { makeGrid, RESOLUTION_TIERS, SIGMA } from './types.ts';
 import type { ClickData, ResolutionTier } from './types.ts';
 
 declare global {
@@ -62,10 +62,19 @@ async function main() {
   const skyboxSelect = document.getElementById('skybox-select') as HTMLSelectElement;
   const skyIntensitySlider = document.getElementById('sky-intensity') as HTMLInputElement;
   const skyIntensityValue = document.getElementById('sky-intensity-value') as HTMLSpanElement;
+  const simulationSpeedSlider = document.getElementById('simulation-speed') as HTMLInputElement;
+  const simulationSpeedValue = document.getElementById('simulation-speed-value') as HTMLSpanElement;
+  waterCompute.simulationSpeed = parseFloat(simulationSpeedSlider.value);
   const waveSpeedSlider = document.getElementById('wave-speed') as HTMLInputElement;
   const waveSpeedValue = document.getElementById('wave-speed-value') as HTMLSpanElement;
   const dampingSlider = document.getElementById('damping') as HTMLInputElement;
   const dampingValue = document.getElementById('damping-value') as HTMLSpanElement;
+  const viscositySlider = document.getElementById('viscosity') as HTMLInputElement;
+  const viscosityValue = document.getElementById('viscosity-value') as HTMLSpanElement;
+  viscositySlider.addEventListener('input', () => {
+    waterCompute.flow.viscosity = parseFloat(viscositySlider.value);
+    viscosityValue.textContent = viscositySlider.value;
+  });
   const rippleAmplitudeSlider = document.getElementById('ripple-amplitude') as HTMLInputElement;
   const rippleAmplitudeValue = document.getElementById('ripple-amplitude-value') as HTMLSpanElement;
   const rippleSizeSlider = document.getElementById('ripple-size') as HTMLInputElement;
@@ -135,10 +144,12 @@ async function main() {
     grid = makeGrid(nh);
     waterCompute = new WaterCompute(device, grid);
     // Carry the live control values over so changing resolution doesn't reset them.
+    waterCompute.simulationSpeed = prevCompute.simulationSpeed;
     waterCompute.waveSpeed = prevCompute.waveSpeed;
     waterCompute.damping = prevCompute.damping;
     waterCompute.rippleAmplitude = prevCompute.rippleAmplitude;
     waterCompute.rippleSize = prevCompute.rippleSize;
+    waterCompute.flow.viscosity = prevCompute.flow.viscosity;
     const prevCaustics = caustics;
     waterRender = new WaterRender(device, format, depthFormat, grid);
     waterRender.setSkyboxTexture(skybox.getTexture());
@@ -160,7 +171,12 @@ async function main() {
     skyIntensityValue.textContent = value.toFixed(1);
   });
 
-  // Wave speed control (propagation speed; dt is CFL-clamped so it stays stable)
+  simulationSpeedSlider.addEventListener('input', () => {
+    waterCompute.simulationSpeed = parseFloat(simulationSpeedSlider.value);
+    simulationSpeedValue.textContent = `${waterCompute.simulationSpeed.toFixed(2)}×`;
+  });
+
+  // Wave speed control; fixed substeps are CFL-safe throughout the UI range.
   waveSpeedSlider.addEventListener('input', () => {
     const value = parseFloat(waveSpeedSlider.value);
     waterCompute.waveSpeed = value;
@@ -205,19 +221,17 @@ async function main() {
     causticStrength = causticsToggle.checked ? slider : 0;
   }
 
-  let clickData: ClickData | null = null;
+  const clicks: ClickData[] = [];
 
-  setupInteraction(canvas, camera, (x: number, z: number) => {
-    clickData = { active: true, x, z };
-  });
+  setupInteraction(canvas, camera, (x: number, z: number, strength: number) => {
+    if (!waterCompute.paused && waterCompute.simulationSpeed > 0) clicks.push({ x, z, strength });
+  }, () => 3 * Math.sqrt(waterCompute.rippleSize / SIGMA));
 
   let lastTime = performance.now();
-  let elapsedTime = 0;
 
   function frame() {
     const now = performance.now();
     const rawDt = now - lastTime;
-    elapsedTime += rawDt * 0.001; // Convert to seconds
     lastTime = now;
 
     resizing();
@@ -225,11 +239,12 @@ async function main() {
     camera.update(aspect);
 
     const commandEncoder = device.createCommandEncoder();
-    rain.update(commandEncoder, rawDt, waterCompute.currentStateBuffer, grid, camera.viewProjMatrix, waterCompute.paused);
+    rain.update(commandEncoder, rawDt, waterCompute.currentStateBuffer, grid, camera.viewProjMatrix,
+      waterCompute.paused ? 0 : waterCompute.simulationSpeed);
 
     // Simulate water
-    waterCompute.simulate(commandEncoder, rawDt, clickData);
-    if (clickData) clickData = null;
+    waterCompute.simulate(commandEncoder, rawDt, clicks);
+    clicks.length = 0;
 
     // Rebind state buffer if it swapped
     waterRender.setStateBuffer(waterCompute.currentStateBuffer);
@@ -241,7 +256,7 @@ async function main() {
     bathtub.updateCamera(vp, causticStrength);
     floor.updateCamera(vp);
     skybox.updateCamera(camera.viewMatrix, camera.projMatrix);
-    waterRender.updateTime(elapsedTime, skybox.intensity);
+    waterRender.updateLighting(skybox.intensity);
 
     // Render
     const renderPass = commandEncoder.beginRenderPass({

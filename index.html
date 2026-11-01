@@ -219,7 +219,7 @@
     
     <div id="controls">
       <h2>Scene Controls</h2>
-      <p class="control-group">Left-drag: ripples<br>Right-drag: orbit · Scroll: zoom</p>
+      <p class="control-group">Left-click or drag: create ripples<br>Right-drag: orbit · Scroll: zoom</p>
       
       <div class="control-group">
         <label for="skybox-select">Background Environment</label>
@@ -254,7 +254,17 @@
       <div class="control-group">
         <div class="slider-container">
           <div class="slider-header">
-            <label for="wave-speed">Wave Speed</label>
+            <label for="simulation-speed" title="Scales time for waves, currents, and rain. Zero pauses; 1× restores the original pace.">Simulation Speed</label>
+            <span class="slider-value" id="simulation-speed-value">0.50×</span>
+          </div>
+          <input type="range" id="simulation-speed" min="0" max="2" step="0.05" value="0.5">
+        </div>
+      </div>
+
+      <div class="control-group">
+        <div class="slider-container">
+          <div class="slider-header">
+            <label for="wave-speed" title="Changes wave propagation physics, not the overall simulation clock.">Wave Speed</label>
             <span class="slider-value" id="wave-speed-value">1.00</span>
           </div>
           <input type="range" id="wave-speed" min="0.2" max="2" step="0.05" value="1.0">
@@ -268,6 +278,16 @@
             <span class="slider-value" id="damping-value">0.20</span>
           </div>
           <input type="range" id="damping" min="0" max="1" step="0.01" value="0.2">
+        </div>
+      </div>
+
+      <div class="control-group">
+        <div class="slider-container">
+          <div class="slider-header">
+            <label for="viscosity" title="Navier–Stokes kinematic viscosity in world units squared per second">Flow Viscosity</label>
+            <span class="slider-value" id="viscosity-value">8</span>
+          </div>
+          <input type="range" id="viscosity" min="0" max="100" step="1" value="8">
         </div>
       </div>
       

@@ -45,10 +45,7 @@ export function makeGrid(nh: number): Grid {
 
 export const C = 0.05;
 export const C2 = C * C;
-export const DAMPING = 0.002;
 export const SIM_SPEED = 1.3;
-export const MAX_DT = 30;
-export const MAX_ITERATED_DT = 100;
 export const MAX_Y = 40;
 export const SIGMA = 0.01;
 // Base water-surface level (world Y). Shared by the wave sim, the water
@@ -57,9 +54,9 @@ export const SIGMA = 0.01;
 export const WATER_LEVEL = 80.0;
 
 export interface ClickData {
-  active: boolean;
   x: number;
   z: number;
+  strength: number; // Fraction of a full click splash; drag samples share its strength.
 }
 
 export interface CameraData {

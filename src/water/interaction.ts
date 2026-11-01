@@ -1,13 +1,19 @@
 import { OrbitCamera } from '../camera/orbit.ts';
 import { W, H, WATER_LEVEL } from '../types.ts';
 
-export function setupInteraction(canvas: HTMLCanvasElement, camera: OrbitCamera, onHit: (x: number, z: number) => void) {
+// Replace each abrupt drag splash with smaller overlapping deposits, not more force.
+const DRAG_SUBDIVISIONS = 12;
+
+export function setupInteraction(canvas: HTMLCanvasElement, camera: OrbitCamera, onHit: (x: number, z: number, strength: number) => void, getSpacing: () => number) {
   let pointerId: number | null = null;
   const invViewProj = new Float32Array(16);
+  let lastHit: [number, number] | null = null;
+  let distanceToNext = 0;
 
   canvas.addEventListener('pointerdown', (e: PointerEvent) => {
     if (e.button !== 0 || pointerId !== null) return;
     pointerId = e.pointerId;
+    lastHit = null;
     canvas.setPointerCapture(e.pointerId);
     disturb(e);
   });
@@ -28,15 +34,19 @@ export function setupInteraction(canvas: HTMLCanvasElement, camera: OrbitCamera,
       canvas.releasePointerCapture(pointerId);
     }
     pointerId = null;
+    lastHit = null;
   });
 
   function stop(e: PointerEvent) {
     if (e.pointerId !== pointerId) return;
     pointerId = null;
+    lastHit = null;
     if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
   }
 
   function disturb(e: PointerEvent) {
+    const previous = lastHit;
+    lastHit = null; // Leaving the pool must not connect two unrelated drag segments.
     const rect = canvas.getBoundingClientRect();
     const ndcX = ((e.clientX - rect.left) / rect.width) * 2 - 1;
     const ndcY = -((e.clientY - rect.top) / rect.height) * 2 + 1;
@@ -70,7 +80,24 @@ export function setupInteraction(canvas: HTMLCanvasElement, camera: OrbitCamera,
     const worldZ = rayOrig[2] + t * rayDir[2];
 
     if (Math.abs(worldX) <= W / 2 && Math.abs(worldZ) <= H / 2) {
-      onHit(worldX, worldZ);
+      if (!previous) {
+        onHit(worldX, worldZ, 1);
+        distanceToNext = getSpacing() / DRAG_SUBDIVISIONS;
+      } else {
+        const dx = worldX - previous[0];
+        const dz = worldZ - previous[1];
+        const length = Math.hypot(dx, dz);
+        // Normalize strength by distance so denser input does not amplify the wake.
+        const spacing = getSpacing() / DRAG_SUBDIVISIONS;
+        let distance = Math.min(distanceToNext, spacing);
+        while (distance <= length) {
+          const t = distance / length;
+          onHit(previous[0] + t * dx, previous[1] + t * dz, 1 / DRAG_SUBDIVISIONS);
+          distance += spacing;
+        }
+        distanceToNext = distance - length;
+      }
+      lastHit = [worldX, worldZ];
     }
   }
 }

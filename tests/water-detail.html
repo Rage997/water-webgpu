@@ -1,0 +1,128 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Velocity-driven water detail regression</title>
+<pre id="output">Running WebGPU detail regressions…</pre>
+<script type="module">
+import { WaterCompute } from '../src/water/compute.ts';
+import { WaterRender } from '../src/water/render.ts';
+import { OrbitCamera } from '../src/camera/orbit.ts';
+import { makeGrid } from '../src/types.ts';
+
+// Run through Vite at /water-webgpu/tests/water-detail.html.
+const output = document.querySelector('#output');
+const results = [];
+const assert = (condition, message) => { if (!condition) throw new Error(message); };
+window.detailResult = (async () => {
+  const adapter = await navigator.gpu.requestAdapter();
+  assert(adapter, 'WebGPU adapter unavailable');
+  const device = await adapter.requestDevice();
+  const errors = [];
+  device.addEventListener('uncapturederror', event => errors.push(event.error.message));
+  device.pushErrorScope('validation');
+  const grid = makeGrid(60);
+  const compute = new WaterCompute(device, grid);
+  const renderer = new WaterRender(device, 'rgba8unorm', 'depth24plus', grid);
+  const size = 256;
+  const target = device.createTexture({ size: [size, size], format: 'rgba8unorm', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+  const depth = device.createTexture({ size: [size, size], format: 'depth24plus', usage: GPUTextureUsage.RENDER_ATTACHMENT });
+  const sky = device.createTexture({ size: [64, 32], format: 'rgba8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+  const skyPixels = new Uint8Array(64 * 32 * 4);
+  for (let y = 0; y < 32; y++) for (let x = 0; x < 64; x++) {
+    const i = (y * 64 + x) * 4;
+    skyPixels.set([x * 4, y * 8, (x % 8 < 4) ? 220 : 30, 255], i);
+  }
+  device.queue.writeTexture({ texture: sky }, skyPixels, { bytesPerRow: 256 }, [64, 32]);
+  const readback = device.createBuffer({ size: size * size * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  const state = new Float32Array(grid.NUM_VERTS * 2);
+  const camera = new OrbitCamera();
+  camera.update(1);
+  renderer.setSkyboxTexture(sky);
+  renderer.updateCamera(camera.viewProjMatrix, camera.eyeX, camera.eyeY, camera.eyeZ);
+
+  async function render({ speed = 0, dt = 0.02, pairSeconds = dt, intensity = 1, time = 1, slope = false, alternate = false } = {}) {
+    for (let i = 0; i < grid.NUM_VERTS; i++) {
+      const height = slope ? (i % grid.NX) * 0.1 : 0;
+      state[i * 2] = height - speed * pairSeconds * (alternate && i % 2 ? -1 : 1);
+      state[i * 2 + 1] = height;
+    }
+    device.queue.writeBuffer(compute.currentStateBuffer, 0, state);
+    renderer.setStateBuffer(compute.currentStateBuffer);
+    renderer.detailIntensity = intensity;
+    renderer.updateParameters(time, 1, dt);
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginRenderPass({
+      colorAttachments: [{ view: target.createView(), loadOp: 'clear', storeOp: 'store', clearValue: [0, 0, 0, 1] }],
+      depthStencilAttachment: { view: depth.createView(), depthLoadOp: 'clear', depthStoreOp: 'store', depthClearValue: 1 },
+    });
+    renderer.render(pass);
+    pass.end();
+    encoder.copyTextureToBuffer({ texture: target }, { buffer: readback, bytesPerRow: size * 4 }, [size, size]);
+    device.queue.submit([encoder.finish()]);
+    await readback.mapAsync(GPUMapMode.READ);
+    const pixels = new Uint8Array(readback.getMappedRange()).slice();
+    readback.unmap();
+    return pixels;
+  }
+  const difference = (a, b) => {
+    let sum = 0;
+    for (let i = 0; i < a.length; i++) if (i % 4 !== 3) sum += (a[i] - b[i]) ** 2;
+    return Math.sqrt(sum / (a.length * 0.75));
+  };
+  async function equivalent(name, a, b) {
+    const rms = difference(await render(a), await render(b));
+    assert(rms < 0.01, `${name}: pixel RMS ${rms}`);
+    results.push({ name, rms });
+  }
+  try {
+    await equivalent('Rest has no detail', {}, { intensity: 0 });
+    await equivalent('Static slope has no detail', { slope: true }, { slope: true, intensity: 0 });
+    await equivalent('Velocity sign symmetry', { speed: 20 }, { speed: -20 });
+    await equivalent('Absolute speed before interpolation', { speed: 20 }, { speed: 20, alternate: true });
+    await equivalent('Completed timestep normalization', { speed: 20, dt: 0.01 }, { speed: 20, dt: 0.04 });
+    await equivalent('Linear amplitude below saturation', { speed: 20 }, { speed: 40, intensity: 0.5 });
+    await equivalent('Speed saturation', { speed: 40 }, { speed: 400 });
+    await equivalent('Intensity zero removes moving detail', { speed: 40, intensity: 0 }, { intensity: 0 });
+    await equivalent('No completed step is calm', { speed: 40, dt: 0, pairSeconds: 0.02 }, { intensity: 0 });
+    const moving = await render({ speed: 40 });
+    const motionRms = difference(moving, await render({ speed: 0 }));
+    const driftRms = difference(moving, await render({ speed: 40, time: 5 }));
+    assert(motionRms > 0.1, `Moving detail invisible: RMS ${motionRms}`);
+    assert(driftRms > 0.1, `Detail does not animate: RMS ${driftRms}`);
+    results.push({ name: 'Motion activation and animation', motionRms, driftRms });
+
+    compute.zeroState();
+    compute.waveSpeed = 3;
+    const step = () => {
+      const encoder = device.createCommandEncoder();
+      compute.simulate(encoder, 1000, []);
+      device.queue.submit([encoder.finish()]);
+    };
+    step();
+    const expected = Math.sqrt(0.5 / (0.05 ** 2 * 9 * (1 / grid.DELTA_X2 + 1 / grid.DELTA_Z2))) * 0.001;
+    assert(Math.abs(compute.lastStepSeconds - expected) < 1e-10, 'Step metadata ignores CFL clamp');
+    assert(compute.simulationTime === compute.lastStepSeconds, 'Clock differs from completed step');
+    const pausedTime = compute.simulationTime;
+    compute.paused = true;
+    step();
+    assert(compute.simulationTime === pausedTime && compute.lastStepSeconds === expected, 'Pause changes pair timing');
+    compute.paused = false;
+    const encoder = device.createCommandEncoder();
+    compute.simulate(encoder, 0, []);
+    device.queue.submit([encoder.finish()]);
+    assert(compute.simulationTime === pausedTime, 'Zero step advances time');
+    results.push({ name: 'CFL, pause, and zero-step timing', stepSeconds: expected });
+    await device.queue.onSubmittedWorkDone();
+    const validation = await device.popErrorScope();
+    assert(!validation, validation?.message);
+    assert(errors.length === 0, errors.join('\n'));
+    output.textContent = 'PASS\n' + JSON.stringify(results, null, 2);
+    return { passed: true, results };
+  } finally {
+    readback.destroy(); target.destroy(); depth.destroy(); sky.destroy();
+    renderer.dispose(); compute.dispose(); device.destroy();
+  }
+})().catch(error => {
+  output.textContent = 'FAIL\n' + error.stack;
+  return { passed: false, error: error.message, results };
+});
+</script>

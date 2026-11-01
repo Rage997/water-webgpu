@@ -1,4 +1,5 @@
 import { W, H, WATER_LEVEL, type Grid } from '../types.ts';
+import { CONSERVATIVE_SPLASH_WGSL } from '../water/splash.ts';
 
 const DROP_COUNT = 96;
 const FALL_HEIGHT = 300;
@@ -30,20 +31,23 @@ struct Params { nx: u32, nz: u32, count: u32, padding: u32 };
 @group(0) @binding(0) var<storage, read_write> state: array<vec2f>;
 @group(0) @binding(1) var<storage, read> impacts: array<vec4f>;
 @group(0) @binding(2) var<uniform> params: Params;
+
+${CONSERVATIVE_SPLASH_WGSL}
+
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) id: vec3u) {
-  // Keep the fixed pool boundary undisturbed.
-  if (id.x == 0u || id.y == 0u || id.x >= params.nx - 1u || id.y >= params.nz - 1u) { return; }
-  let p = vec2f(f32(id.x) / f32(params.nx - 1u) * ${W}.0 - ${W / 2},
-                f32(id.y) / f32(params.nz - 1u) * ${H}.0 - ${H / 2});
+  if (id.x >= params.nx || id.y >= params.nz) { return; }
+  let q = vec2i(id.xy);
+  let spacing = vec2f(${W}.0, ${H}.0) / vec2f(f32(params.nx-1u), f32(params.nz-1u));
+  let inverseSpacing2 = 1.0 / (spacing*spacing);
   var displacement = 0.0;
   for (var i = 0u; i < params.count; i++) {
-    let delta = p - impacts[i].xy;
-    let r2 = dot(delta, delta);
-    // impacts.z is depth; impacts.w is 2*sigma^2. Truncate at five sigma.
-    if (r2 < 12.5 * impacts[i].w) {
-      displacement -= impacts[i].z * exp(-r2 / impacts[i].w);
-    }
+    let impact = impacts[i];
+    let laplacian = splashLaplacian(q, vec2i(i32(params.nx)-1, i32(params.nz)-1),
+      vec2f(${W}.0, ${H}.0), impact.xy+vec2f(${W/2}, ${H/2}), impact.w, inverseSpacing2);
+    // A depression plus a compensating rim. w=2*sigma²; w/4 normalizes
+    // the continuous central depth to impact.z. No global level correction.
+    displacement += impact.z * (0.25*impact.w) * laplacian;
   }
   let index = id.y * params.nx + id.x;
   // Displace both time levels, like click splashes, without a dt-dependent kick.
@@ -110,7 +114,7 @@ export class Rain {
   }
 
   private spawn(offset: number) {
-    // Keep impacts inside the pool, away from its pinned edge vertices.
+    // Keep drop centres slightly inset; broad impact rims can still reach walls.
     this.drops[offset] = (Math.random() - 0.5) * (W - 24);
     this.drops[offset + 1] = WATER_LEVEL + FALL_HEIGHT;
     this.drops[offset + 2] = (Math.random() - 0.5) * (H - 24);
@@ -119,10 +123,10 @@ export class Rain {
     this.speedSamples[index] = Math.random() * 2 - 1;
   }
 
-  update(encoder: GPUCommandEncoder, rawDtMs: number, state: GPUBuffer, grid: Grid, vp: Float32Array, paused: boolean) {
+  update(encoder: GPUCommandEncoder, rawDtMs: number, state: GPUBuffer, grid: Grid, vp: Float32Array, timeScale: number) {
     if (!this.enabled) return;
-    // No catch-up storm on returning from a background tab.
-    const dt = paused ? 0 : Math.min(Math.max(rawDtMs, 0), 50) * 0.001;
+    // Cap wall time before scaling, matching the water clock without catch-up storms.
+    const dt = Math.min(Math.max(rawDtMs, 0), 50) * 0.001 * timeScale;
     let count = 0;
     for (let i = 0; i < DROP_COUNT; i++) {
       const offset = i * 4;

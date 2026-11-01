@@ -34,10 +34,11 @@ fn main(@builtin(vertex_index) idx: u32, input: VertexInput) -> VertexOutput {
   let ix = i % nx;
   let iz = i / nx;
 
-  let hL = select(heightState[i - 1].y, h, ix == 0);
-  let hR = select(heightState[i + 1].y, h, ix == nx - 1);
-  let hD = select(heightState[i - nx].y, h, iz == 0);
-  let hU = select(heightState[i + nx].y, h, iz == nz - 1);
+  // Mirror neighbors at the rigid pool walls, matching the simulation.
+  let hL = heightState[iz * nx + abs(ix - 1)].y;
+  let hR = heightState[iz * nx + min(ix + 1, 2 * (nx - 1) - ix - 1)].y;
+  let hD = heightState[abs(iz - 1) * nx + ix].y;
+  let hU = heightState[min(iz + 1, 2 * (nz - 1) - iz - 1) * nx + ix].y;
 
   let ddx = (hR - hL) / (2.0 * ${dx});
   let ddz = (hU - hD) / (2.0 * ${dz});
@@ -58,7 +59,7 @@ fn main(@builtin(vertex_index) idx: u32, input: VertexInput) -> VertexOutput {
 const WATER_FRAG = `
 @group(0) @binding(2) var skyboxTexture: texture_2d<f32>;
 @group(0) @binding(3) var skyboxSampler: sampler;
-@group(0) @binding(4) var<uniform> timeData: vec4f;
+@group(0) @binding(4) var<uniform> lighting: vec4f;
 
 const PI = 3.14159265359;
 
@@ -73,38 +74,11 @@ fn fresnel_schlick(cosTheta: f32, F0: f32) -> f32 {
   return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
-fn perturb_normal(worldPos: vec3f, baseNormal: vec3f, time: f32) -> vec3f {
-  // Multiple octaves of sine waves for fine ripple detail
-  let freq1 = 0.3;
-  let freq2 = 0.7;
-  let speed = 0.1;
-  
-  let p = worldPos.xz * 0.05 + time * speed;
-  
-  let n1 = vec2f(
-    sin(p.x * freq1 + p.y * 0.5),
-    sin(p.y * freq1 - p.x * 0.3)
-  ) * 0.08;
-  
-  let n2 = vec2f(
-    sin(p.x * freq2 - p.y * 0.7),
-    sin(p.y * freq2 + p.x * 0.4)
-  ) * 0.04;
-  
-  let perturbation = n1 + n2;
-  return normalize(vec3f(
-    baseNormal.x + perturbation.x,
-    baseNormal.y,
-    baseNormal.z + perturbation.y
-  ));
-}
 
 @fragment
 fn main(in: VertexOutput) -> @location(0) vec4f {
-  let time = timeData.x;
-  
-  // Perturb normal for fine detail
-  let n = perturb_normal(in.worldPos, normalize(in.normal), time);
+  // All visible ripples come from the simulated surface, including dispersion.
+  let n = normalize(in.normal);
   let v = normalize(in.viewDir);
   let lightDir = normalize(vec3f(0.2, 0.8, 0.3));
   
@@ -112,9 +86,9 @@ fn main(in: VertexOutput) -> @location(0) vec4f {
   let F0 = 0.02; // Water base reflectivity cosntant
   let fresnel = fresnel_schlick(max(dot(n, v), 0.0), F0);
   
-  // Sample skybox reflection via equirect UV (scaled by sky intensity in timeData.y)
+  // Sample skybox reflection via equirect UV, scaled by sky intensity.
   let reflectDir = reflect(-v, n);
-  let skyColor = textureSample(skyboxTexture, skyboxSampler, dirToEquirectUV(reflectDir)).rgb * timeData.y;
+  let skyColor = textureSample(skyboxTexture, skyboxSampler, dirToEquirectUV(reflectDir)).rgb * lighting.x;
   
   // Water colors - darker for depth
   let waterColor = vec3f(0.0, 0.4, 0.55);
@@ -158,11 +132,12 @@ export class WaterRender {
   bindGroupLayout!: GPUBindGroupLayout;
   bindGroup!: GPUBindGroup;
   cameraBuffer!: GPUBuffer;
-  timeBuffer!: GPUBuffer;
+  lightingBuffer!: GPUBuffer;
   skyboxTexture!: GPUTexture;
   skyboxSampler!: GPUSampler;
 
   private _device: GPUDevice;
+  private _lighting = new Float32Array(4);
 
   constructor(device: GPUDevice, format: GPUTextureFormat, depthFormat: GPUTextureFormat, grid: Grid) {
     this._device = device;
@@ -216,7 +191,7 @@ export class WaterRender {
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
-    this.timeBuffer = device.createBuffer({
+    this.lightingBuffer = device.createBuffer({
       size: 16,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
@@ -276,7 +251,7 @@ export class WaterRender {
     this.vertexBuffer.destroy();
     this.indexBuffer.destroy();
     this.cameraBuffer.destroy();
-    this.timeBuffer.destroy();
+    this.lightingBuffer.destroy();
   }
 
   updateCamera(viewProj: Float32Array, eyeX: number, eyeY: number, eyeZ: number) {
@@ -292,11 +267,9 @@ export class WaterRender {
     this.skyboxTexture = texture;
   }
 
-  updateTime(time: number, skyIntensity: number) {
-    const data = new Float32Array(4);
-    data[0] = time;
-    data[1] = skyIntensity;
-    this._device.queue.writeBuffer(this.timeBuffer, 0, data);
+  updateLighting(skyIntensity: number) {
+    this._lighting[0] = skyIntensity;
+    this._device.queue.writeBuffer(this.lightingBuffer, 0, this._lighting);
   }
 
   setStateBuffer(buffer: GPUBuffer) {
@@ -307,7 +280,7 @@ export class WaterRender {
         { binding: 1, resource: { buffer: this.cameraBuffer } },
         { binding: 2, resource: this.skyboxTexture.createView() },
         { binding: 3, resource: this.skyboxSampler },
-        { binding: 4, resource: { buffer: this.timeBuffer } },
+        { binding: 4, resource: { buffer: this.lightingBuffer } },
       ],
     });
   }
