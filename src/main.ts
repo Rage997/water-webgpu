@@ -10,6 +10,7 @@ import { Rain } from './scene/rain.ts';
 import { setupInteraction } from './water/interaction.ts';
 import { makeGrid, RESOLUTION_TIERS, SIGMA } from './types.ts';
 import type { ClickData, ResolutionTier } from './types.ts';
+import { enableSettings, hideLoading, showError, showLoading } from './ui.ts';
 
 declare global {
   interface Window {
@@ -23,6 +24,9 @@ async function main() {
   const canvas = document.getElementById('gpu-canvas') as HTMLCanvasElement;
   if (!canvas) throw new Error('Canvas not found');
 
+  if (!navigator.gpu) {
+    throw new Error('WebGPU is unavailable. Open this page in a WebGPU-capable browser over HTTPS or localhost.');
+  }
   const ctx = await initWebGPU(canvas);
   const { device, context, format, depthFormat, depthTexture, resize, width, height } = ctx;
 
@@ -41,10 +45,13 @@ async function main() {
   const skybox = new Skybox(device, format, depthFormat);
   const rain = new Rain(device, format, depthFormat);
 
-  // Hide initial loading panel when skybox is ready
-  const loadingPanel = document.getElementById('loading-panel') as HTMLDivElement;
-  skybox.onReady(() => {
-    loadingPanel.classList.remove('visible');
+  showLoading('Loading the environment', 'The water is ready. Preparing the light…');
+  skybox.ready.then(enableSettings, (error: unknown) => {
+    console.error('Failed to load initial environment:', error);
+    showError('Environment could not load', 'Check your connection, then reload the experiment.', true);
+  });
+  device.lost.then(() => {
+    showError('The GPU connection was lost', 'Reload the experiment to start again.', true);
   });
 
   // Set skybox texture on water renderer
@@ -112,21 +119,16 @@ async function main() {
 
   // Skybox selection
   skyboxSelect.addEventListener('change', async () => {
-    loadingPanel.classList.add('visible');
+    showLoading('Changing the light', 'Loading the selected environment…');
     skyboxSelect.disabled = true;
-    
-    // Show loading panel for minimum 500ms so user sees it
-    const minDisplayTime = new Promise(resolve => setTimeout(resolve, 500));
-    
     try {
-      await Promise.all([
-        skybox.loadSkybox(skyboxSelect.value),
-        minDisplayTime
-      ]);
+      await skybox.loadSkybox(skyboxSelect.value);
+      hideLoading();
     } catch (error) {
       console.error('Failed to load skybox:', error);
+      skyboxSelect.value = skybox.getCurrentSkybox();
+      showError('Environment could not load', 'Your previous environment is still active. Try another, or reload.');
     } finally {
-      loadingPanel.classList.remove('visible');
       skyboxSelect.disabled = false;
     }
   });
@@ -298,4 +300,7 @@ async function main() {
   requestAnimationFrame(frame);
 }
 
-main().catch(console.error);
+main().catch((error: unknown) => {
+  console.error(error);
+  showError('Unable to start the experiment', error instanceof Error ? error.message : 'Check WebGPU support and reload to try again.', true);
+});

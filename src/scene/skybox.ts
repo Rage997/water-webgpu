@@ -83,8 +83,7 @@ export class Skybox {
   private _upload = new Float32Array(20);
   // Current loaded skybox filename
   private _currentSkybox = 'citrus_orchard_puresky_4k.exr';
-  // Callback for when initial load completes
-  private _onReadyCallback?: () => void;
+  readonly ready: Promise<void>;
   constructor(device: GPUDevice, format: GPUTextureFormat, depthFormat: GPUTextureFormat) {
     this._device = device;
 
@@ -108,8 +107,8 @@ export class Skybox {
       addressModeV: 'clamp-to-edge', // clamp at the poles
     });
 
-    // Load the equirectangular EXR sky asynchronously
-    this._loadSky();
+    // Expose initial loading to the UI, including failures.
+    this.ready = this._loadSky();
 
     const vertModule = device.createShaderModule({ code: SKYBOX_VERT });
     const fragModule = device.createShaderModule({ code: SKYBOX_FRAG });
@@ -176,41 +175,26 @@ export class Skybox {
 
   async loadSkybox(filename: string) {
     if (this._currentSkybox === filename) return;
-    this._currentSkybox = filename;
     await this._loadSky(filename);
+    this._currentSkybox = filename;
   }
 
   getCurrentSkybox(): string {
     return this._currentSkybox;
   }
 
-  onReady(callback: () => void) {
-    this._onReadyCallback = callback;
-  }
-
   private async _loadSky(filename?: string) {
     const skyFile = filename || this._currentSkybox;
-    try {
-      const { data, width, height } = await loadEXR(`${import.meta.env.BASE_URL}textures/${skyFile}`);
-      if (width !== EQUIRECT_W || height !== EQUIRECT_H) {
-        console.error(`Sky EXR is ${width}x${height}, expected ${EQUIRECT_W}x${EQUIRECT_H}`);
-        return;
-      }
-      // data is float16 RGBA: 4 channels x 2 bytes per texel.
-      this._device.queue.writeTexture(
-        { texture: this.skyTexture },
-        data,
-        { bytesPerRow: width * 4 * 2, rowsPerImage: height },
-        [width, height, 1]
-      );
-      
-      // Notify that initial load is complete
-      if (this._onReadyCallback) {
-        this._onReadyCallback();
-        this._onReadyCallback = undefined; // Only call once for initial load
-      }
-    } catch (err) {
-      console.error('Failed to load EXR sky:', err);
+    const { data, width, height } = await loadEXR(`${import.meta.env.BASE_URL}textures/${skyFile}`);
+    if (width !== EQUIRECT_W || height !== EQUIRECT_H) {
+      throw new Error(`Sky EXR is ${width}x${height}, expected ${EQUIRECT_W}x${EQUIRECT_H}`);
     }
+    // data is float16 RGBA: 4 channels x 2 bytes per texel.
+    this._device.queue.writeTexture(
+      { texture: this.skyTexture },
+      data,
+      { bytesPerRow: width * 4 * 2, rowsPerImage: height },
+      [width, height, 1]
+    );
   }
 }

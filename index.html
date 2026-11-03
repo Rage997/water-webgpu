@@ -1,381 +1,76 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Waterwave WebGPU Experiment</title>
-    <style>
-      * { margin: 0; padding: 0; box-sizing: border-box; }
-      html, body { width: 100%; height: 100%; overflow: hidden; background: #000; font-family: system-ui, -apple-system, sans-serif; }
-      canvas { display: block; width: 100%; height: 100%; }
-      
-      #controls {
-        position: absolute;
-        top: 20px;
-        right: 20px;
-        background: rgba(0, 0, 0, 0.75);
-        backdrop-filter: blur(10px);
-        border-radius: 8px;
-        padding: 20px;
-        color: white;
-        min-width: 280px;
-        max-height: calc(100vh - 40px);
-        overflow-y: auto;
-        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
-      }
-      
-      #controls h2 {
-        font-size: 16px;
-        font-weight: 600;
-        margin-bottom: 16px;
-        color: #fff;
-      }
-      
-      .control-group {
-        margin-bottom: 20px;
-      }
-      
-      .control-group:last-child {
-        margin-bottom: 0;
-      }
-      
-      .control-group label {
-        display: block;
-        font-size: 13px;
-        font-weight: 500;
-        margin-bottom: 8px;
-        color: #ccc;
-      }
-      
-      .control-group select,
-      .control-group input[type="range"] {
-        width: 100%;
-      }
-      
-      .control-group select {
-        padding: 8px 12px;
-        background: rgba(255, 255, 255, 0.1);
-        border: 1px solid rgba(255, 255, 255, 0.2);
-        border-radius: 4px;
-        color: white;
-        font-size: 13px;
-        cursor: pointer;
-      }
-      
-      .control-group select:hover {
-        background: rgba(255, 255, 255, 0.15);
-      }
-      
-      .control-group select:focus {
-        outline: none;
-        border-color: rgba(255, 255, 255, 0.4);
-      }
-      
-      .control-group option {
-        background: #1a1a1a;
-        color: white;
-      }
-      
-      .slider-container {
-        display: flex;
-        flex-direction: column;
-        gap: 4px;
-      }
-      
-      .slider-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-      }
-      
-      .slider-value {
-        font-size: 13px;
-        color: #fff;
-        font-weight: 500;
-      }
-      
-      input[type="range"] {
-        -webkit-appearance: none;
-        appearance: none;
-        height: 6px;
-        background: rgba(255, 255, 255, 0.1);
-        border-radius: 3px;
-        outline: none;
-      }
-      
-      input[type="range"]::-webkit-slider-thumb {
-        -webkit-appearance: none;
-        appearance: none;
-        width: 16px;
-        height: 16px;
-        background: white;
-        border-radius: 50%;
-        cursor: pointer;
-        transition: background 0.15s;
-      }
-      
-      input[type="range"]::-webkit-slider-thumb:hover {
-        background: #f0f0f0;
-      }
-      
-      input[type="checkbox"] {
-        -webkit-appearance: none;
-        appearance: none;
-        width: 38px;
-        height: 20px;
-        background: rgba(255, 255, 255, 0.15);
-        border-radius: 10px;
-        position: relative;
-        cursor: pointer;
-        transition: background 0.15s;
-        flex-shrink: 0;
-      }
-      
-      input[type="checkbox"]::before {
-        content: "";
-        position: absolute;
-        top: 2px;
-        left: 2px;
-        width: 16px;
-        height: 16px;
-        background: #fff;
-        border-radius: 50%;
-        transition: transform 0.15s;
-      }
-      
-      input[type="checkbox"]:checked {
-        background: #4a90d9;
-      }
-      
-      input[type="checkbox"]:checked::before {
-        transform: translateX(18px);
-      }
-      
-      input[type="range"]::-moz-range-thumb {
-        width: 16px;
-        height: 16px;
-        background: white;
-        border: none;
-        border-radius: 50%;
-        cursor: pointer;
-        transition: background 0.15s;
-      }
-      
-      input[type="range"]::-moz-range-thumb:hover {
-        background: #f0f0f0;
-      }
-      
-      #loading-panel {
-        position: fixed;
-        top: 50%;
-        left: 50%;
-        transform: translate(-50%, -50%);
-        background: rgba(0, 0, 0, 0.9);
-        backdrop-filter: blur(10px);
-        border-radius: 12px;
-        padding: 30px 40px;
-        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.8);
-        display: none;
-        flex-direction: column;
-        align-items: center;
-        gap: 16px;
-        z-index: 1000;
-        min-width: 280px;
-      }
-      
-      #loading-panel.visible {
-        display: flex;
-      }
-      
-      .loading-spinner {
-        width: 40px;
-        height: 40px;
-        border: 4px solid rgba(255, 255, 255, 0.1);
-        border-top-color: #fff;
-        border-radius: 50%;
-        animation: spin 1s linear infinite;
-      }
-      
-      @keyframes spin {
-        to { transform: rotate(360deg); }
-      }
-      
-      .loading-text {
-        color: #fff;
-        font-size: 16px;
-        font-weight: 500;
-        text-align: center;
-      }
-      
-      .loading-subtext {
-        color: #aaa;
-        font-size: 13px;
-        text-align: center;
-      }
-    </style>
+    <meta name="description" content="Explore waves, currents, light, and rain in an interactive WebGPU water experiment." />
+    <title>Water pool: a webgpu experiment</title>
+    <script>
+      try {
+        if (localStorage.getItem('waterwave-theme') === 'light') {
+          document.documentElement.dataset.theme = 'light';
+        }
+      } catch { /* Keep the default theme when storage is unavailable. */ }
+    </script>
+    <link rel="stylesheet" href="./src/ui.css" />
   </head>
   <body>
-    <canvas id="gpu-canvas"></canvas>
-    
-    <div id="controls">
-      <h2>Scene Controls</h2>
-      <p class="control-group">Left-click or drag: create ripples<br>Right-drag: orbit · Scroll: zoom</p>
-      
-      <div class="control-group">
-        <label for="skybox-select">Background Environment</label>
-        <select id="skybox-select">
-          <option value="citrus_orchard_puresky_4k.exr">Citrus Orchard</option>
-          <option value="qwantani_sunset_puresky_4k.exr">Qwantani Sunset</option>
-          <option value="qwantani_dusk_2_puresky_4k.exr">Qwantani Dusk</option>
-        </select>
+    <canvas id="gpu-canvas" aria-label="Interactive water simulation" aria-describedby="interaction-help"></canvas>
+    <aside id="controls" aria-label="Experiment controls">
+      <div class="panel-heading">
+        <h1>Water pool: <span>a webgpu experiment</span></h1>
+        <button id="theme-toggle" type="button" role="switch" aria-checked="true" aria-label="Dark theme" title="Switch to light theme">
+          <svg class="theme-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></svg>
+          <svg class="theme-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 14A8.5 8.5 0 0 1 10 3.5 8.5 8.5 0 1 0 20.5 14Z"/></svg>
+        </button>
+        <button id="controls-toggle" type="button" aria-expanded="true" aria-controls="control-content" aria-label="Hide controls"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 14 5-5 5 5"/></svg></button>
       </div>
-      
-      <div class="control-group">
-        <label for="resolution-select" title="Higher = smoother waves but more GPU work. Changing this rebuilds and resets the water.">Water Resolution</label>
-        <select id="resolution-select" title="Higher = smoother waves but more GPU work. Changing this rebuilds and resets the water.">
-          <option value="ultralow">Ultra Low</option>
-          <option value="low">Low</option>
-          <option value="medium">Medium</option>
-          <option value="high" selected>High</option>
-          <option value="veryhigh">Very High</option>
-        </select>
+      <div id="control-content">
+        <fieldset id="simulation-controls" disabled>
+          <legend class="sr-only">Simulation settings</legend>
+          <details open>
+            <summary>Water <span class="section-note">Motion &amp; flow</span></summary>
+            <div class="section-body">
+              <div class="control-group"><div class="slider-header"><label for="simulation-speed">Simulation speed</label><output id="simulation-speed-value" for="simulation-speed">0.50×</output></div><input type="range" id="simulation-speed" min="0" max="2" step="0.05" value="0.5" aria-describedby="speed-help"><p id="speed-help" class="hint">Slow time down. Set to zero to pause.</p></div>
+              <div class="control-group"><div class="slider-header"><label for="wave-speed">Wave speed</label><output id="wave-speed-value" for="wave-speed">1.00</output></div><input type="range" id="wave-speed" min="0.2" max="2" step="0.05" value="1.0" aria-describedby="wave-help"><p id="wave-help" class="hint">How quickly waves travel across the pool.</p></div>
+              <div class="control-group"><div class="slider-header"><label for="damping">Damping</label><output id="damping-value" for="damping">0.20</output></div><input type="range" id="damping" min="0" max="1" step="0.01" value="0.2" aria-describedby="damping-help"><p id="damping-help" class="hint">Higher values let waves settle sooner.</p></div>
+              <div class="control-group"><div class="slider-header"><label for="viscosity">Flow viscosity</label><output id="viscosity-value" for="viscosity">8</output></div><input type="range" id="viscosity" min="0" max="100" step="1" value="8" aria-describedby="viscosity-help"><p id="viscosity-help" class="hint">Resistance to flow, in world units²/s.</p></div>
+            </div>
+          </details>
+          <details>
+            <summary>Ripples &amp; rain <span class="section-note">Disturb the surface</span></summary>
+            <div class="section-body">
+              <div class="control-group"><div class="slider-header"><label for="ripple-amplitude">Ripple amplitude</label><output id="ripple-amplitude-value" for="ripple-amplitude">40</output></div><input type="range" id="ripple-amplitude" min="5" max="80" step="1" value="40"></div>
+              <div class="control-group"><div class="slider-header"><label for="ripple-size">Ripple size</label><output id="ripple-size-value" for="ripple-size">1.0</output></div><input type="range" id="ripple-size" min="0.3" max="3" step="0.1" value="1.0"></div>
+              <div class="toggle-row"><label for="rain-toggle">Rain</label><input type="checkbox" id="rain-toggle" role="switch" checked></div>
+              <fieldset id="rain-controls"><legend class="sr-only">Rain settings</legend>
+                <div class="control-group"><div class="slider-header"><label for="rain-strength">Rain strength</label><output id="rain-strength-value" for="rain-strength">2</output></div><input type="range" id="rain-strength" min="0" max="5" step="1" value="2"></div>
+                <div class="control-group"><div class="slider-header"><label for="rain-size">Rain size</label><output id="rain-size-value" for="rain-size">8.0</output></div><input type="range" id="rain-size" min="4" max="16" step="0.5" value="8"></div>
+                <div class="control-group"><div class="slider-header"><label for="rain-variety">Rain variety</label><output id="rain-variety-value" for="rain-variety">0.50</output></div><input type="range" id="rain-variety" min="0" max="1" step="0.05" value="0.5"></div>
+              </fieldset>
+            </div>
+          </details>
+          <details>
+            <summary>Light &amp; environment <span class="section-note">Set the atmosphere</span></summary>
+            <div class="section-body">
+              <div class="control-group"><label for="skybox-select">Environment</label><select id="skybox-select"><option value="citrus_orchard_puresky_4k.exr">Citrus Orchard</option><option value="qwantani_sunset_puresky_4k.exr">Qwantani Sunset</option><option value="qwantani_dusk_2_puresky_4k.exr">Qwantani Dusk</option></select></div>
+              <div class="control-group"><div class="slider-header"><label for="sky-intensity">Sky brightness</label><output id="sky-intensity-value" for="sky-intensity">1.0</output></div><input type="range" id="sky-intensity" min="0" max="3" step="0.1" value="1.0"></div>
+              <div class="toggle-row"><label for="caustics-toggle">Caustics</label><input type="checkbox" id="caustics-toggle" role="switch" checked></div>
+              <p class="hint toggle-hint">The shifting patterns of light beneath the water.</p>
+              <fieldset id="caustics-controls"><legend class="sr-only">Caustics settings</legend><div class="control-group"><div class="slider-header"><label for="caustics-intensity">Caustics intensity</label><output id="caustics-intensity-value" for="caustics-intensity">1.0</output></div><input type="range" id="caustics-intensity" min="0" max="3" step="0.1" value="1.0"></div></fieldset>
+            </div>
+          </details>
+          <details>
+            <summary>Quality <span class="section-note">GPU workload</span></summary>
+            <div class="section-body"><div class="control-group"><label for="resolution-select">Water resolution</label><select id="resolution-select" aria-describedby="resolution-help"><option value="ultralow">Ultra low</option><option value="low">Low</option><option value="medium">Medium</option><option value="high" selected>High</option><option value="veryhigh">Very high</option></select><p class="hint" id="resolution-help">Higher quality uses more GPU power. Changing resolution resets the water.</p></div></div>
+          </details>
+        </fieldset>
       </div>
-      
-      <div class="control-group">
-        <div class="slider-container">
-          <div class="slider-header">
-            <label for="sky-intensity">Sky Brightness</label>
-            <span class="slider-value" id="sky-intensity-value">1.0</span>
-          </div>
-          <input type="range" id="sky-intensity" min="0" max="3" step="0.1" value="1.0">
-        </div>
-      </div>
-      
-      <div class="control-group">
-        <div class="slider-container">
-          <div class="slider-header">
-            <label for="simulation-speed" title="Scales time for waves, currents, and rain. Zero pauses; 1× restores the original pace.">Simulation Speed</label>
-            <span class="slider-value" id="simulation-speed-value">0.50×</span>
-          </div>
-          <input type="range" id="simulation-speed" min="0" max="2" step="0.05" value="0.5">
-        </div>
-      </div>
+    </aside>
 
-      <div class="control-group">
-        <div class="slider-container">
-          <div class="slider-header">
-            <label for="wave-speed" title="Changes wave propagation physics, not the overall simulation clock.">Wave Speed</label>
-            <span class="slider-value" id="wave-speed-value">1.00</span>
-          </div>
-          <input type="range" id="wave-speed" min="0.2" max="2" step="0.05" value="1.0">
-        </div>
-      </div>
-      
-      <div class="control-group">
-        <div class="slider-container">
-          <div class="slider-header">
-            <label for="damping">Damping</label>
-            <span class="slider-value" id="damping-value">0.20</span>
-          </div>
-          <input type="range" id="damping" min="0" max="1" step="0.01" value="0.2">
-        </div>
-      </div>
-
-      <div class="control-group">
-        <div class="slider-container">
-          <div class="slider-header">
-            <label for="viscosity" title="Navier–Stokes kinematic viscosity in world units squared per second">Flow Viscosity</label>
-            <span class="slider-value" id="viscosity-value">8</span>
-          </div>
-          <input type="range" id="viscosity" min="0" max="100" step="1" value="8">
-        </div>
-      </div>
-      
-      <div class="control-group">
-        <div class="slider-container">
-          <div class="slider-header">
-            <label for="ripple-amplitude">Ripple Amplitude</label>
-            <span class="slider-value" id="ripple-amplitude-value">40</span>
-          </div>
-          <input type="range" id="ripple-amplitude" min="5" max="80" step="1" value="40">
-        </div>
-      </div>
-      
-      <div class="control-group">
-        <div class="slider-container">
-          <div class="slider-header">
-            <label for="ripple-size">Ripple Size</label>
-            <span class="slider-value" id="ripple-size-value">1.0</span>
-          </div>
-          <input type="range" id="ripple-size" min="0.3" max="3" step="0.1" value="1.0">
-        </div>
-      </div>
-      
-      <div class="control-group">
-        <div class="slider-container">
-          <div class="slider-header">
-            <label for="rain-toggle">Rain</label>
-            <input type="checkbox" id="rain-toggle" checked>
-          </div>
-        </div>
-      </div>
-
-      <div class="control-group">
-        <div class="slider-container">
-          <div class="slider-header">
-            <label for="rain-strength">Rain Strength</label>
-            <span class="slider-value" id="rain-strength-value">2</span>
-          </div>
-          <input type="range" id="rain-strength" min="0" max="5" step="1" value="2">
-        </div>
-      </div>
-
-      <div class="control-group">
-        <div class="slider-container">
-          <div class="slider-header">
-            <label for="rain-size">Rain Size</label>
-            <span class="slider-value" id="rain-size-value">8.0</span>
-          </div>
-          <input type="range" id="rain-size" min="4" max="16" step="0.5" value="8">
-        </div>
-      </div>
-
-      <div class="control-group">
-        <div class="slider-container">
-          <div class="slider-header">
-            <label for="rain-variety">Rain Variety</label>
-            <span class="slider-value" id="rain-variety-value">0.50</span>
-          </div>
-          <input type="range" id="rain-variety" min="0" max="1" step="0.05" value="0.5">
-        </div>
-      </div>
-
-      <div class="control-group">
-        <div class="slider-container">
-          <div class="slider-header">
-            <label for="caustics-toggle">Caustics</label>
-            <input type="checkbox" id="caustics-toggle" checked>
-          </div>
-        </div>
-      </div>
-
-      <div class="control-group">
-        <div class="slider-container">
-          <div class="slider-header">
-            <label for="caustics-intensity">Caustics Intensity</label>
-            <span class="slider-value" id="caustics-intensity-value">1.0</span>
-          </div>
-          <input type="range" id="caustics-intensity" min="0" max="3" step="0.1" value="1.0">
-        </div>
-      </div>
-    </div>
-    
-    <div id="loading-panel" class="visible">
-      <div class="loading-spinner"></div>
-      <div class="loading-text">Loading Environment Map</div>
-      <div class="loading-subtext">Please wait...</div>
-    </div>
-    
+    <footer class="interaction-bar" id="interaction-help"><span><strong>Make ripples</strong> Click or drag the water</span><span><strong>Look around</strong> Right-drag to orbit</span><span><strong>Move closer</strong> Scroll to zoom</span><span class="touch-help">Touch and drag the water to make ripples.</span></footer>
+    <div id="loading-panel" class="visible" role="status" aria-live="polite" aria-atomic="true"><span class="loading-spinner" aria-hidden="true"></span><div><p class="loading-text">Preparing the water</p><p class="loading-subtext">Starting your WebGPU experiment…</p></div><button id="reload-button" type="button" hidden>Reload</button></div>
+    <noscript><p class="noscript-message">This interactive experiment needs JavaScript and a browser with WebGPU enabled.</p></noscript>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
