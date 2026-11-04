@@ -7,6 +7,7 @@ import { Bathtub } from './scene/bathtub.ts';
 import { Floor } from './scene/floor.ts';
 import { Skybox } from './scene/skybox.ts';
 import { Rain } from './scene/rain.ts';
+import { DragSphere } from './scene/sphere.ts';
 import { setupInteraction } from './water/interaction.ts';
 import { makeGrid, RESOLUTION_TIERS, SIGMA } from './types.ts';
 import type { ClickData, ResolutionTier } from './types.ts';
@@ -44,7 +45,7 @@ async function main() {
   const floor = new Floor(device, format, depthFormat);
   const skybox = new Skybox(device, format, depthFormat);
   const rain = new Rain(device, format, depthFormat);
-
+  const sphere = new DragSphere(device, format, depthFormat);
   showLoading('Loading the environment', 'The water is ready. Preparing the light…');
   skybox.ready.then(enableSettings, (error: unknown) => {
     console.error('Failed to load initial environment:', error);
@@ -93,6 +94,12 @@ async function main() {
   rain.enabled = rainToggle.checked;
   rainToggle.addEventListener('input', () => {
     rain.enabled = rainToggle.checked;
+  });
+
+  const sphereToggle = document.getElementById('sphere-toggle') as HTMLInputElement;
+  sphere.enabled = sphereToggle.checked;
+  sphereToggle.addEventListener('input', () => {
+    sphere.enabled = sphereToggle.checked;
   });
 
   const rainStrengthSlider = document.getElementById('rain-strength') as HTMLInputElement;
@@ -227,7 +234,7 @@ async function main() {
 
   setupInteraction(canvas, camera, (x: number, z: number, strength: number) => {
     if (!waterCompute.paused && waterCompute.simulationSpeed > 0) clicks.push({ x, z, strength });
-  }, () => 3 * Math.sqrt(waterCompute.rippleSize / SIGMA));
+  }, () => 3 * Math.sqrt(waterCompute.rippleSize / SIGMA), sphere);
 
   let lastTime = performance.now();
 
@@ -240,12 +247,21 @@ async function main() {
     const aspect = width() / height();
     camera.update(aspect);
 
+    // The ball chases the pointer target even while the sim is paused.
+    sphere.update(rawDt);
+
     const commandEncoder = device.createCommandEncoder();
     rain.update(commandEncoder, rawDt, waterCompute.currentStateBuffer, grid, camera.viewProjMatrix,
       waterCompute.paused ? 0 : waterCompute.simulationSpeed);
 
-    // Simulate water
-    waterCompute.simulate(commandEncoder, rawDt, clicks);
+    // Simulate water; the ball displaces the surface and stirs the current.
+    waterCompute.simulate(commandEncoder, rawDt, clicks, {
+      x: sphere.position[0],
+      y: sphere.position[1],
+      z: sphere.position[2],
+      radius: sphere.radius,
+      active: sphere.enabled,
+    });
     clicks.length = 0;
 
     // Rebind state buffer if it swapped
@@ -257,6 +273,7 @@ async function main() {
     waterRender.updateCamera(vp, camera.eyeX, camera.eyeY, camera.eyeZ);
     bathtub.updateCamera(vp, causticStrength);
     floor.updateCamera(vp);
+    sphere.updateCamera(vp, camera.eyeX, camera.eyeY, camera.eyeZ);
     skybox.updateCamera(camera.viewMatrix, camera.projMatrix);
     waterRender.updateLighting(skybox.intensity);
 
@@ -279,6 +296,7 @@ async function main() {
     skybox.render(renderPass);
     bathtub.render(renderPass);
     floor.render(renderPass);
+    if (sphere.enabled) sphere.render(renderPass);
     waterRender.render(renderPass);
     rain.render(renderPass);
 

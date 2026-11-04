@@ -59,6 +59,15 @@ export interface ClickData {
   strength: number; // Fraction of a full click splash; drag samples share its strength.
 }
 
+// The draggable ball's state, consumed by the sim each frame.
+export interface SphereState {
+  x: number;
+  y: number;
+  z: number;
+  radius: number;
+  active: boolean;
+}
+
 export interface CameraData {
   viewProjMatrix: Float32Array;
   eye: Float32Array;

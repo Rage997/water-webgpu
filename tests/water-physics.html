@@ -4,7 +4,7 @@
 <pre id="output">Running GPU physics regressions…</pre>
 <script type="module">
 import { WaterCompute } from '../src/water/compute.ts';
-import { makeGrid, C2, SIM_SPEED, SIGMA, W, H } from '../src/types.ts';
+import { makeGrid, C2, SIM_SPEED, SIGMA, W, H, WATER_LEVEL } from '../src/types.ts';
 import { Rain } from '../src/scene/rain.ts';
 const output = document.querySelector('#output');
 window.physicsResult = (async () => {
@@ -42,6 +42,11 @@ window.physicsResult = (async () => {
   function addCurrent(sim, x, z) {
     const encoder = device.createCommandEncoder();
     sim.flow.addImpulse(encoder, x, z, 100, 40, SIGMA / sim.rippleSize);
+    device.queue.submit([encoder.finish()]);
+  }
+  function advanceSphere(sim, dt, sphere, clicks = []) {
+    const encoder = device.createCommandEncoder();
+    sim.simulate(encoder, dt, clicks, sphere);
     device.queue.submit([encoder.finish()]);
   }
   try {
@@ -290,6 +295,187 @@ window.physicsResult = (async () => {
       results.push({name: `Six seconds of varied rain: rows=${rows}, size=${size}`, mean, min, max});
       sim.dispose();
     }
+
+    // 1. Preserve displaced volume, a visible local disturbance, and limited
+    // crest height. A broad mound must not replace the sphere-sized reaction.
+    const capVolume = (cy, r) => {
+      if (r <= 0) return 0;
+      const h = Math.min(2 * r, Math.max(0, WATER_LEVEL - (cy - r)));
+      return Math.PI * h * h * (3 * r - h) / 3;
+    };
+    const displacedVolume = (data, g) => meanHeight(data, g) * W * H;
+    const sphereGrid = makeGrid(200); // fine grid keeps the volume quadrature error small
+
+    for (const [rows, cx, cy, cz] of [
+      [60, 0, WATER_LEVEL, 0],
+      [200, 0, 32, 0],
+      [60, -W / 2 + 32, 32, -H / 2 + 32],
+      [200, -W / 2 + 32, 32, -H / 2 + 32],
+    ]) {
+      const sim = new WaterCompute(device, makeGrid(rows)), g = sim.grid, r = 32;
+      advanceSphere(sim, 0, { x: cx, y: cy, z: cz, radius: r, active: true });
+      const data = await readState(sim);
+      let velocityError = 0, peak = 0, farMin = Infinity, farMax = -Infinity;
+      for (let z = 0; z < g.NZ; z++) for (let x = 0; x < g.NX; x++) {
+        const i = 2 * (z * g.NX + x), height = data[i + 1];
+        assert(Number.isFinite(height) && height >= 0, 'Insertion must raise finite water');
+        velocityError = Math.max(velocityError, Math.abs(height - data[i]));
+        peak = Math.max(peak, height);
+        const distance = Math.hypot(-W / 2 + x * g.DELTA_X - cx, -H / 2 + z * g.DELTA_Z - cz);
+        if (distance > 2 * r) {
+          farMin = Math.min(farMin, height);
+          farMax = Math.max(farMax, height);
+        }
+      }
+      const volume = displacedVolume(data, g), analytic = capVolume(cy, r);
+      assert(Math.abs(volume - analytic) / analytic < 0.002,
+        `Displaced volume escaped the pool: ${volume} != ${analytic}`);
+      assert(velocityError === 0, `Submerging injected vertical velocity: ${velocityError}`);
+      assert(peak < r / 2, `Insertion produced a body-sized crest: ${peak}`);
+      assert(farMax - farMin < 0.0001, 'Sphere forcing smeared a varying mound across distant water');
+      assert(peak - farMax > r / 16, 'Sphere forcing lost its visible local crest');
+      results.push({ name: `Localized sphere volume: rows=${rows}, x=${cx}, y=${cy}, z=${cz}`, volume, analytic, peak, localContrast: peak - farMax });
+      sim.dispose();
+    }
+
+    // 2. Lifting the ball out of the water removes the displaced volume.
+    {
+      const sim = new WaterCompute(device, sphereGrid), g = sim.grid;
+      const cx = -40, cz = 20, r = 32;
+      advanceSphere(sim, 0, { x: cx, y: WATER_LEVEL, z: cz, radius: r, active: true });
+      const submerged = displacedVolume(await readState(sim), g);
+      advanceSphere(sim, 0, { x: cx, y: WATER_LEVEL + 2 * r, z: cz, radius: r, active: true });
+      const maxAbs = (await readState(sim)).reduce((m, h) => Math.max(m, Math.abs(h)), 0);
+      assert(submerged > 0, `No displaced volume before extraction: ${submerged}`);
+      assert(maxAbs < 0.05, `Extraction left displaced volume: ${maxAbs}`);
+      results.push({ name: 'Extraction removes displaced volume', submerged, maxAbs });
+      sim.dispose();
+    }
+
+    // 3. Translating a wet ball stirs a current along its motion (the wake),
+    //    and that current carries the displaced volume forward.
+    {
+      const sim = new WaterCompute(device, sphereGrid), g = sim.grid;
+      const x0 = -60, y = WATER_LEVEL, z0 = 0, r = 32, dx = 40;
+      advanceSphere(sim, 0, { x: x0, y, z: z0, radius: r, active: true });
+      advanceSphere(sim, 0, { x: x0 + dx, y, z: z0, radius: r, active: true });
+      const velocity = await readState(sim, sim.flow.velocityBuffer);
+      let sumVx = 0, sumVz = 0, maxV = 0;
+      for (let i = 0; i < velocity.length; i += 2) {
+        sumVx += velocity[i]; sumVz += velocity[i + 1];
+        maxV = Math.max(maxV, Math.abs(velocity[i]), Math.abs(velocity[i + 1]));
+      }
+      assert(maxV > 1, `Translation created no current: ${maxV}`);
+      assert(sumVx > 0 && Math.abs(sumVx) > Math.abs(sumVz),
+        `Wake not along the motion: vx=${sumVx}, vz=${sumVz}`);
+      const xCenter = d => {
+        let s = 0, m = 0;
+        for (let z = 0; z < g.NZ; z++) for (let x = 0; x < g.NX; x++) {
+          const h = d[2 * (z * g.NX + x) + 1];
+          s += h; m += h * (-W / 2 + x * g.DELTA_X);
+        }
+        return m / s;
+      };
+      const before = xCenter(await readState(sim));
+      for (let i = 0; i < 40; i++) advanceSphere(sim, 1000 / 60, { x: x0 + dx, y, z: z0, radius: r, active: true });
+      const after = xCenter(await readState(sim));
+      assert(after > before, `Wake did not carry the displaced volume forward: ${before} -> ${after}`);
+      results.push({ name: 'Translation creates a forward wake', sumVx, sumVz, maxV, shift: after - before });
+      sim.dispose();
+    }
+
+    // 4. Moving an airborne ball (never wet) forces neither the surface nor
+    //    the current.
+    {
+      const sim = new WaterCompute(device, sphereGrid), g = sim.grid;
+      const x0 = -60, y = WATER_LEVEL + 2 * 32, z0 = 0, r = 32, dx = 40;
+      advanceSphere(sim, 0, { x: x0, y, z: z0, radius: r, active: true });
+      advanceSphere(sim, 0, { x: x0 + dx, y, z: z0, radius: r, active: true });
+      const maxH = (await readState(sim)).reduce((m, h) => Math.max(m, Math.abs(h)), 0);
+      const maxV = (await readState(sim, sim.flow.velocityBuffer)).reduce((m, h) => Math.max(m, Math.abs(h)), 0);
+      assert(maxH === 0, `Airborne movement displaced water: ${maxH}`);
+      assert(maxV === 0, `Airborne movement stirred the current: ${maxV}`);
+      results.push({ name: 'Airborne movement forces nothing', maxH, maxV });
+      sim.dispose();
+    }
+
+    // 5. A stationary ball applies zero forcing: after its one-time displacement
+    //    it evolves exactly like a no-ball field (it neither overwrites nor
+    //    damps an existing wave).
+    {
+      const g = sphereGrid;
+      const simA = new WaterCompute(device, g);
+      simA.injectGaussian(30, 0, 6, 0.001); // an existing wave
+      const cx = -80, cy = WATER_LEVEL, cz = 0, r = 32;
+      advanceSphere(simA, 0, { x: cx, y: cy, z: cz, radius: r, active: true }); // one-time displacement
+      const field = await readState(simA);
+      const simB = new WaterCompute(device, g);
+      device.queue.writeBuffer(simB.currentStateBuffer, 0, field);
+      advanceSphere(simA, 1000 / 60, { x: cx, y: cy, z: cz, radius: r, active: true }); // stationary
+      advance(simB, 1000 / 60); // no ball
+      let diff = 0;
+      const a = await readState(simA), b = await readState(simB);
+      for (let i = 0; i < a.length; i++) diff = Math.max(diff, Math.abs(a[i] - b[i]));
+      assert(diff < 0.05, `Stationary ball forced the field: ${diff}`);
+      results.push({ name: 'Stationary ball applies no forcing (does not flatten waves)', diff });
+      simA.dispose(); simB.dispose();
+    }
+
+    // 6. Disabling a ball removes its displaced volume once and then stops:
+    //    the remaining wave is left to evolve, matching a no-ball field.
+    {
+      const g = sphereGrid;
+      const simA = new WaterCompute(device, g);
+      simA.injectGaussian(30, 0, 6, 0.001); // an existing wave
+      const cx = -80, cy = WATER_LEVEL, cz = 0, r = 32;
+      advanceSphere(simA, 0, { x: cx, y: cy, z: cz, radius: r, active: true }); // add displacement
+      const withSphere = displacedVolume(await readState(simA), g);
+      advanceSphere(simA, 0, { x: cx, y: cy, z: cz, radius: r, active: false }); // remove it once
+      const afterDisable = displacedVolume(await readState(simA), g);
+      const field = await readState(simA);
+      const simB = new WaterCompute(device, g);
+      device.queue.writeBuffer(simB.currentStateBuffer, 0, field);
+      for (let i = 0; i < 30; i++) {
+        advanceSphere(simA, 1000 / 60, { x: cx, y: cy, z: cz, radius: r, active: false });
+        advance(simB, 1000 / 60);
+      }
+      let diff = 0;
+      const a = await readState(simA), b = await readState(simB);
+      for (let i = 0; i < a.length; i++) diff = Math.max(diff, Math.abs(a[i] - b[i]));
+      assert(withSphere > afterDisable, `Disabling did not remove displaced volume: ${withSphere} -> ${afterDisable}`);
+      assert(diff < 0.05, `Disabled ball kept forcing the field: ${diff}`);
+      results.push({ name: 'Disabling removes volume once without continual damping', withSphere, afterDisable, diff });
+      simA.dispose(); simB.dispose();
+    }
+
+    // Slow and fast complete dunk/extraction cycles must remain gentle without
+    // clipping the field or permanently adding/removing water.
+    const dunkPeaks = [];
+    for (const frames of [12, 90]) {
+      const sim = new WaterCompute(device, makeGrid(60)), r = 32;
+      const sphere = { x: 0, y: WATER_LEVEL + 2 * r, z: 0, radius: r, active: true };
+      advanceSphere(sim, 0, sphere);
+      let peak = 0;
+      for (const descending of [true, false]) {
+        for (let frame = 1; frame <= frames; frame++) {
+          const t = frame / frames, eased = t * t * (3 - 2 * t);
+          sphere.y = descending
+            ? WATER_LEVEL + 2 * r - (WATER_LEVEL + r) * eased
+            : r + (WATER_LEVEL + r) * eased;
+          advanceSphere(sim, 1000 / 60, sphere);
+          const field = await readState(sim);
+          for (let i = 1; i < field.length; i += 2) peak = Math.max(peak, Math.abs(field[i]));
+        }
+      }
+      const mean = meanHeight(await readState(sim), sim.grid);
+      assert(peak < r / 2, `Vertical motion produced a body-sized wave: ${peak}`);
+      assert(Math.abs(mean) < 0.002, `Dunk/extraction changed water volume: ${mean}`);
+      dunkPeaks.push(peak);
+      results.push({ name: `Gentle full dunk and extraction: ${frames} frames each way`, peak, mean });
+      sim.dispose();
+    }
+    assert(dunkPeaks[1] < dunkPeaks[0], `Slow dunk was not gentler: ${dunkPeaks}`);
+
     await device.queue.onSubmittedWorkDone();
     assert(errors.length === 0, errors.join('\n'));
     output.textContent = JSON.stringify({passed: true, results}, null, 2);

@@ -42,6 +42,8 @@
             <div class="section-body">
               <div class="control-group"><div class="slider-header"><label for="ripple-amplitude">Ripple amplitude</label><output id="ripple-amplitude-value" for="ripple-amplitude">40</output></div><input type="range" id="ripple-amplitude" min="5" max="80" step="1" value="40"></div>
               <div class="control-group"><div class="slider-header"><label for="ripple-size">Ripple size</label><output id="ripple-size-value" for="ripple-size">1.0</output></div><input type="range" id="ripple-size" min="0.3" max="3" step="0.1" value="1.0"></div>
+              <div class="toggle-row"><label for="sphere-toggle">Ball</label><input type="checkbox" id="sphere-toggle" role="switch" checked></div>
+              <p class="hint toggle-hint">Drag the ball down to submerge it or up to lift it out. Shift-drag moves it horizontally at the same depth.</p>
               <div class="toggle-row"><label for="rain-toggle">Rain</label><input type="checkbox" id="rain-toggle" role="switch" checked></div>
               <fieldset id="rain-controls"><legend class="sr-only">Rain settings</legend>
                 <div class="control-group"><div class="slider-header"><label for="rain-strength">Rain strength</label><output id="rain-strength-value" for="rain-strength">2</output></div><input type="range" id="rain-strength" min="0" max="5" step="1" value="2"></div>
@@ -68,7 +70,7 @@
       </div>
     </aside>
 
-    <footer class="interaction-bar" id="interaction-help"><span><strong>Make ripples</strong> Click or drag the water</span><span><strong>Look around</strong> Right-drag to orbit</span><span><strong>Move closer</strong> Scroll to zoom</span><span class="touch-help">Touch and drag the water to make ripples.</span></footer>
+    <footer class="interaction-bar" id="interaction-help"><span><strong>Make ripples</strong> Click or drag the water</span><span><strong>Submerge / lift ball</strong> Drag the ball down / up</span><span><strong>Move ball horizontally</strong> Shift-drag the ball</span><span><strong>Look around</strong> Right-drag to orbit</span><span><strong>Move closer</strong> Scroll to zoom</span><span class="touch-help">Drag the ball to submerge or lift it; drag the water to make ripples.</span></footer>
     <div id="loading-panel" class="visible" role="status" aria-live="polite" aria-atomic="true"><span class="loading-spinner" aria-hidden="true"></span><div><p class="loading-text">Preparing the water</p><p class="loading-subtext">Starting your WebGPU experiment…</p></div><button id="reload-button" type="button" hidden>Reload</button></div>
     <noscript><p class="noscript-message">This interactive experiment needs JavaScript and a browser with WebGPU enabled.</p></noscript>
     <script type="module" src="/src/main.ts"></script>
