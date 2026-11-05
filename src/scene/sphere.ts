@@ -15,8 +15,6 @@ struct Camera {
   center: vec3f,
   radius: f32,
   eye: vec3f,
-  color: vec3f,
-  pad: f32,
 };
 
 struct VertexInput {
@@ -41,6 +39,24 @@ fn main(input: VertexInput) -> VertexOutput {
 }
 `;
 
+// Single source of truth for the ball's look: the rasterized sphere and the
+// water's refracted ray hits both call shadeSphere with the same coral color
+// and lighting.
+export const SPHERE_SHADING = `
+const SPHERE_COLOR: vec3f = vec3f(0.93, 0.45, 0.30);
+
+fn shadeSphere(normal: vec3f, viewDir: vec3f) -> vec3f {
+  let n = normalize(normal);
+  let v = normalize(viewDir);
+  let lightDir = normalize(vec3f(0.2, 0.8, 0.3));
+  let ndl = max(dot(n, lightDir), 0.0);
+  let h = normalize(lightDir + v);
+  let spec = pow(max(dot(n, h), 0.0), 64.0) * 0.6;
+  let rim = pow(1.0 - max(dot(n, v), 0.0), 3.0);
+  return SPHERE_COLOR * (0.25 + 0.75 * ndl) + vec3f(spec) + SPHERE_COLOR * rim * 0.2;
+}
+`;
+
 const SPHERE_FRAG = `
 @group(0) @binding(0) var<uniform> cam: Camera;
 
@@ -49,9 +65,9 @@ struct Camera {
   center: vec3f,
   radius: f32,
   eye: vec3f,
-  color: vec3f,
-  pad: f32,
 };
+
+${SPHERE_SHADING}
 
 struct VertexOutput {
   @builtin(position) clipPos: vec4f,
@@ -61,15 +77,7 @@ struct VertexOutput {
 
 @fragment
 fn main(in: VertexOutput) -> @location(0) vec4f {
-  let n = normalize(in.normal);
-  let v = normalize(cam.eye - in.worldPos);
-  let lightDir = normalize(vec3f(0.2, 0.8, 0.3));
-  let ndl = max(dot(n, lightDir), 0.0);
-  let h = normalize(lightDir + v);
-  let spec = pow(max(dot(n, h), 0.0), 64.0) * 0.6;
-  let rim = pow(1.0 - max(dot(n, v), 0.0), 3.0);
-  let col = cam.color * (0.25 + 0.75 * ndl) + vec3f(spec) + cam.color * rim * 0.2;
-  return vec4f(col, 1.0);
+  return vec4f(shadeSphere(in.normal, cam.eye - in.worldPos), 1.0);
 }
 `;
 
@@ -112,7 +120,7 @@ export class DragSphere {
   private _vertexBuffer: GPUBuffer;
   private _indexBuffer: GPUBuffer;
   private _indexCount: number;
-  private _cameraData = new Float32Array(28); // 112 bytes: WGSL pads the struct to 16-byte alignment
+  private _cameraData = new Float32Array(24); // 96 bytes: WGSL pads the struct to 16-byte alignment
 
   constructor(device: GPUDevice, format: GPUTextureFormat, depthFormat: GPUTextureFormat) {
     this._device = device;
@@ -214,7 +222,6 @@ export class DragSphere {
     d[16] = this.position[0]; d[17] = this.position[1]; d[18] = this.position[2];
     d[19] = this.radius;
     d[20] = eyeX; d[21] = eyeY; d[22] = eyeZ;
-    d[24] = 0.93; d[25] = 0.45; d[26] = 0.30; // coral; vec3f starts at byte 96
     this._device.queue.writeBuffer(this._cameraBuffer, 0, d);
   }
 

@@ -45,6 +45,7 @@ h_tt + γ h_t = c² (L h − ℓ² L² h)
 - Rigid walls use zero normal slope with mirrored stencils.
 - Pointer and rain impulses conserve volume: they redistribute water rather than filling or draining the pool.
 - The ball creates localized ripples with reduced wave strength; the remaining displaced volume changes the pool's mean level. Wet horizontal motion pushes currents, and existing waves keep propagating when the ball stops.
+- Water refracts the pool and ball through its simulated normals with IOR **1.333**. Direct ray intersections keep tiles, caustics, and submerged objects stable at silhouettes and screen edges; Fresnel blends transmission with environment reflection.
 - This is a height-field surface over a 2D current field, not a 3D free-surface solver..
 
 [Full details: solver setup, caustics](docs/how-it-works.md)
@@ -66,13 +67,13 @@ npm run preview
 
 ## Tests
 
-`tests/water-physics.html`
+- `tests/water-physics.html` — simulation and ball interactions.
+- `tests/water-refraction.html` — GPU checks for Snell-law receiver hits, hidden/offscreen pool surfaces, moving submerged objects, and temporal continuity.
 
 ## Planned work
 
 1. **Finite-depth gravity dispersion** — extend the capillary-style height-field model
-2. **Refraction** — scene distortion through the water surface
-3. **Foam/spray** — particle effects at wave peaks
+2. **Foam/spray** — particle effects at wave peaks
 
 ## Resources
 

@@ -13,7 +13,7 @@ The water spans **290 × 590 world units** in the X–Z plane, centred at the or
 
 [`makeGrid`](../src/types.ts#L15-L44) derives surface dimensions and X/Z spacings from the selected number of rows. [`StableFlow.constructor`](../src/water/flow.ts#L74-L85) caps the current grid at 100 rows, keeping pressure solves smaller than the surface mesh. Increasing water resolution therefore does not necessarily increase current resolution; Ultra Low is below that cap.
 
-The current starts at zero. **Neither pointer input nor rain injects horizontal velocity.** The ordinary demo shows surface waves on otherwise still currents; [`StableFlow.addImpulse`](../src/water/flow.ts#L189-L196) is available for prescribed-current experiments and tests. The Flow Viscosity slider therefore does not change the strength of ordinary click ripples.
+The current starts at zero. Water clicks and rain do not inject horizontal velocity, but moving a wet ball does, through [`StableFlow.addImpulse`](../src/water/flow.ts). The Flow Viscosity slider affects those ball-driven currents, not the strength of ordinary click ripples.
 
 ## 2. Startup and one frame
 
@@ -22,25 +22,26 @@ The current starts at zero. **Neither pointer input nor rain injects horizontal 
 - [`initWebGPU`](../src/wgpu/context.ts) obtains an adapter/device, configures the canvas, and owns its resizable depth texture. There is no WebGL fallback; device loss is logged, not automatically recovered.
 - [`OrbitCamera`](../src/camera/orbit.ts) owns view/projection matrices and right-drag/scroll controls.
 - `WaterCompute`, `WaterRender`, and `Caustics` share the water-grid description. Rendering and caustics read the simulation's current GPU buffer directly.
-- `Bathtub`, `Floor`, `Skybox`, and `Rain` provide the rest of the scene. The bathtub receives the caustic textures; the water renderer receives the environment texture.
+- `Bathtub`, `Floor`, `Skybox`, `Rain`, and `DragSphere` provide the rest of the scene. The bathtub and refracted pool share the same material bind group, including tile and caustic textures; the ball shares its shading function with water. No screen-space scene capture is needed.
 
-The actual command order is in [`frame`](../src/main.ts#L232-L287):
+The actual command order is in [`frame`](../src/main.ts):
 
 ```mermaid
 flowchart TD
-    Frame[Resize canvas and update camera] --> Rain[Update rain and encode batched impacts]
+    Frame[Resize canvas and update camera and ball] --> Rain[Update rain and encode batched impacts]
     Rain --> Input[Apply queued pointer splashes]
-    Input --> Due{Fixed physics steps due?}
+    Input --> Ball[Apply changed submerged volume and wet-motion current]
+    Ball --> Due{Fixed physics steps due?}
     Due -->|Yes| Flow[Diffuse / project / advect / project current]
     Flow --> Transport[Transport both surface time levels]
     Transport --> Waves[Advance dispersive waves]
     Waves --> Due
     Due -->|No| Caustics[Compute caustic receiver textures]
-    Caustics --> Draw[Draw skybox, bathtub, floor, water, rain]
+    Caustics --> Draw[Draw skybox, bathtub, floor, ball, refractive water, rain]
     Draw --> Submit[Submit command buffer and request next frame]
 ```
 
-The CPU handles events, the camera, rain-particle positions, uniforms, and command encoding. The large fluid fields remain on the GPU; the animation loop does not read them back to JavaScript. Rain and pointer impacts are applied once per displayed frame, before any due physics steps. An unpaused frame with no physics step can still apply a click and render it.
+The CPU handles events, the camera, ball and rain-particle positions, uniforms, and command encoding. The large fluid fields remain on the GPU; the animation loop does not read them back to JavaScript. Rain, pointer impacts, and sphere-volume changes are applied once per displayed frame, before any due physics steps. An unpaused frame with no physics step can still apply a click or ball displacement and render it.
 
 **Why alternating buffers?** Stencil kernels need neighbours from the old field. Writing those same neighbour values during a dispatch would introduce execution-order-dependent results across workgroups. Jacobi iterations, advection, and wave evolution instead read one buffer and write another. Each surface substep transports into the other buffer, swaps, advances waves into the other buffer, and swaps again. Consumers use [`currentStateBuffer`](../src/water/compute.ts#L228-L234), rather than assuming which buffer is current.
 
@@ -82,7 +83,7 @@ The shader computes acceleration from the current height and uses a centred damp
 
 [`simulate`](../src/water/compute.ts#L276-L335) accumulates elapsed time, runs all due fixed steps, and retains the fractional remainder. It caps each wall-time frame at 100 ms before scaling, so a suspended tab does not catch up indefinitely.
 
-- **Simulation Speed** scales the accumulator and rain motion. It changes how many steps run, not their duration. The app starts at 0.5×; zero freezes simulation and ignores pointer disturbances while keeping camera interaction active.
+- **Simulation Speed** scales the accumulator and rain motion. It changes how many steps run, not their duration. The app starts at 0.5×; zero freezes simulation and ignores water clicks while keeping the camera and ball movable. On resume, the ball applies the net displacement since its last accepted pose.
 - **Wave Speed** changes `c²`, hence propagation physics. The implementation clamps its multiplier to 0–2; the UI starts at 1.
 - **Damping** maps to `γ = 0.05 × damping²`, controlling vertical-wave decay. It is separate from current viscosity.
 - **Units matter:** the wave solver uses milliseconds, with `C = 0.05` world units/ms and the additional elapsed-time factor `SIM_SPEED = 1.3` from [`types.ts`](../src/types.ts#L46-L54). Flow receives the same step divided by 1000, in seconds. Rain uses its own 50 ms frame cap and the user speed multiplier, not the additional `SIM_SPEED` factor.
@@ -91,9 +92,9 @@ Fixed steps support repeatable equal-time comparisons with controlled forcing. T
 
 ## 5. Pointer input and rain redistribute surface water
 
-[`setupInteraction`](../src/water/interaction.ts) unprojects the pointer with the inverse view–projection matrix and intersects the resulting ray with the **flat rest-water plane**, not the displaced mesh. Hits outside the pool are discarded.
+[`setupInteraction`](../src/water/interaction.ts) unprojects the pointer with the inverse view–projection matrix. A left press first raycasts the ball; a hit starts a ball drag instead of a splash. Otherwise, it intersects the **flat rest-water plane**, not the displaced mesh, and discards hits outside the pool.
 
-A left press deposits a full click. Dragging interpolates smaller deposits along the world-space path: 1/12 click strength at 1/12 of the nominal spacing. With the default ripple size, the spacing is 2.5 world units. Carrying the remaining distance between events avoids tying trail density to mouse-event frequency. Holding still deposits nothing; leaving the pool breaks the segment. The [`main.ts` callback](../src/main.ts#L224-L228) batches hits and rejects them while paused.
+A left press on the water deposits a full click. Dragging interpolates smaller deposits along the world-space path: 1/12 click strength at 1/12 of the nominal spacing. With the default ripple size, the spacing is 2.5 world units. Carrying the remaining distance between events avoids tying trail density to mouse-event frequency. Holding still deposits nothing; leaving the pool breaks the segment. The [`main.ts` callback](../src/main.ts#L224-L228) batches hits and rejects them while paused.
 
 The [`click shader`](../src/water/compute.ts#L75-L124) and rain's [`IMPACT_SHADER`](../src/scene/rain.ts#L29-L56) share [`CONSERVATIVE_SPLASH_WGSL`](../src/water/splash.ts):
 
@@ -106,15 +107,45 @@ The [`click shader`](../src/water/compute.ts#L75-L124) and rain's [`IMPACT_SHADE
 
 For the app's actual defaults, read [`index.html`](../index.html#L314-L350) together with the [`main.ts` initialization](../src/main.ts#L85-L111): rain strength is 2, size 8, and variety 0.5. The `Rain` class's standalone strength initializer is 14, but the app overwrites it from the UI.
 
+### Ball displacement
+
+Ordinary ball dragging uses a camera-facing plane fixed at the grabbed point, allowing vertical motion without snapping the ball's centre to the cursor. Holding Shift when grabbing selects a horizontal plane at the current depth. [`DragSphere`](../src/scene/sphere.ts) follows the target in three dimensions and clamps against the walls and floor. Its radius is 32, so it fits completely below the rest waterline at 80. Release holds the chosen position; there is no autonomous buoyancy or gravity simulation.
+
+[`WaterCompute`](../src/water/compute.ts) retains the previous accepted sphere pose. It applies the submerged column near the ball at 15% strength. The remaining 85% of the analytic submerged volume contributes to a small uniform water-level change, preserving displacement without creating diameter-sized local crests:
+
+```text
+h = clamp(WATER_LEVEL − center_y + radius, 0, 2 * radius)
+volume = pi * h² * (radius − h / 3)
+column = cell_average(submerged_sphere_column)
+source = 0.15 * column + 0.85 * volume / (pool_width * pool_length)
+displacement = source(new_pose) − source(previous_pose)
+```
+
+Four quarter-cell samples average the submerged column to soften grid aliasing at the sphere's rim, without spreading it into a broad mound. The wave-producing source remains localized around the ball. This reduces the forcing strength, not existing waves: it does not clip surface heights or increase wave damping.
+
+The displacement is added to **both** stored surface heights. Insertion raises water, extraction lowers it, and horizontal movement removes displaced water behind the ball while adding it ahead. A stationary pose applies nothing: existing waves continue propagating rather than being relaxed toward a target bulge. Disabling or omitting the ball removes its displaced volume once. Resetting the water also clears the accepted-pose history.
+
+Wet horizontal motion additionally injects a current impulse proportional to horizontal displacement and the spherical-cap submerged-volume fraction. Airborne or disabled movement does not stir the current. Submergence uses the rest waterline, not the instantaneous waves; this remains a height-field approximation, not a 3D solid-fluid collision solver. Grid sampling approximates the inserted volume, and the existing surface-advection step is not globally volume-conservative.
+
+Sphere regressions in [`tests/water-physics.html`](../tests/water-physics.html) cover volume near walls and corners at multiple resolutions, a visible local crest without a broad mound, bounded crests during slow/fast dunk cycles, extraction, directional currents, airborne movement, stationary waves, and disabling.
+
 ## 6. Turning the fields into an image
 
 ### The water surface
 
-[`WaterRender`](../src/water/render.ts) creates an indexed X–Z grid. Its [`vertex shader`](../src/water/render.ts#L3-L57) reads the current height directly from storage, displaces each vertex to `80 + h`, and estimates the geometric normal from neighbouring heights:
+[`WaterRender`](../src/water/render.ts) creates an indexed X–Z grid. Its vertex shader reads the current height directly from storage, displaces each vertex to `WATER_LEVEL + h`, and estimates the geometric normal from neighbouring heights:
 
 $$\mathbf n = \operatorname{normalize}(-\partial_x h,\ 1,\ -\partial_z h).$$
 
-The [`fragment shader`](../src/water/render.ts#L59-L124) combines environment reflection, Schlick Fresnel with `F0 = 0.02`, coloured ambient/diffuse lighting, and a Blinn–Phong-style specular highlight. Water is alpha-blended over previously drawn geometry. The variable named `refracted` is a lighting-colour term: it does **not** trace a view ray or sample a refracted scene image.
+The fragment shader refracts the camera ray through that normal with `refract(-viewDir, normal, 1 / 1.333)`. [`refraction.ts`](../src/water/refraction.ts) intersects the ray with the five finite pool faces and the draggable sphere, selecting the closest positive hit. It does not ray-march a camera depth image. A hidden receiver or a hit outside the viewport therefore has the same geometry and shading as a visible one; there is no switch back to an undistorted screen sample.
+
+Raster and refracted pool surfaces call the same `shadeTub` WGSL function with exact face-specific tile coordinates and caustic maps. Both ball paths call `shadeSphere`; the refracted path uses the outgoing ray as its local view direction. Rays that miss the bounded pool and sphere sample the environment. The ray scene is deliberately specific to this pool and ball, not a general triangle-mesh tracer; adding another underwater object requires adding its intersection and material.
+
+Transmission and reflection are weighted by Schlick Fresnel, with `F0 = ((1.333 - 1) / (1.333 + 1))²`; the existing Blinn–Phong-style highlight remains. The water output is opaque **as a composited pixel**, not as a material: there is no second alpha blend to leak undistorted tiles through. Water writes depth so the nearest surface wins when wave crests overlap, and foreground geometry still occludes it. Rendering uses one scene pass and no extra full-resolution color texture or scene copy.
+
+This remains a single-interface height-field approximation, not multi-bounce optical transport through breaking waves. Water remains clear: wavelength-dependent absorption is still planned work.
+
+[`tests/water-refraction.html`](../tests/water-refraction.html) covers independently calculated receiver intersections and rendered material colors, including pool boundaries, hidden/offscreen receivers, sphere motion, and temporal continuity. These replace the screen-space fixtures that did not exercise the original moving-silhouette and viewport-boundary artifacts.
 
 Current ripple normals come from the simulated surface only. [`detail-normal.ts`](../src/water/detail-normal.ts) remains in the tree, but its procedural normal texture is not imported by the active renderer and there is no Detail Intensity UI control.
 

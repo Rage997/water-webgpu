@@ -1,0 +1,210 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Water refraction regression</title>
+<pre id="output">Running WebGPU refraction regressions…</pre>
+<script type="module">
+import { WaterRender } from '../src/water/render.ts';
+import { W, WATER_LEVEL, makeGrid } from '../src/types.ts';
+import { TUB_WIDTH, TUB_DEPTH, TUB_HEIGHT } from '../src/water/receivers.ts';
+import { perspective, lookAt, multiply, inverse } from '../src/math.ts';
+
+// Run through Vite at /water-webgpu/tests/water-refraction.html.
+// No opaque framebuffer is supplied: hidden/offscreen receivers must be shaded
+// from actual geometry, not replaced by an undistorted screen sample.
+const output = document.querySelector('#output');
+const results = [];
+const assert = (condition, message) => { if (!condition) throw new Error(message); };
+function unit(v) { const length = Math.hypot(...v); return v.map(x => x / length); }
+function transform(m, v) {
+  const p = [0, 0, 0, 0];
+  for (let r = 0; r < 4; r++) for (let c = 0; c < 4; c++) p[r] += m[c * 4 + r] * v[c];
+  return p.slice(0, 3).map(x => x / p[3]);
+}
+function camera(eye, target = [0, 80, 0], fov = Math.PI / 3) {
+  const up = eye[0] === target[0] && eye[2] === target[2] ? [0, 0, -1] : [0, 1, 0];
+  const vp = multiply(perspective(fov, 1, 1, 2000), lookAt(...eye, ...target, ...up), new Float32Array(16));
+  return { eye, vp, inv: inverse(vp, new Float32Array(16)) };
+}
+
+window.refractionResult = (async () => {
+  const adapter = await navigator.gpu.requestAdapter();
+  assert(adapter, 'WebGPU adapter unavailable');
+  const device = await adapter.requestDevice();
+  const errors = [];
+  device.addEventListener('uncapturederror', event => errors.push(event.error.message));
+  device.pushErrorScope('validation');
+  const size = 256, grid = makeGrid(60);
+  const poolLayout = device.createBindGroupLayout({ entries: [
+    { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+    { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: {} },
+    { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+    ...Array.from({ length: 5 }, (_, i) => ({ binding: i + 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } })),
+    { binding: 8, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'non-filtering' } },
+  ] });
+  const renderer = new WaterRender(device, 'rgba8unorm', 'depth24plus', grid, poolLayout);
+  const state = new Float32Array(grid.NUM_VERTS * 2);
+  const stateBuffer = device.createBuffer({ size: state.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+  const poolUniform = device.createBuffer({ size: 80, usage: GPUBufferUsage.UNIFORM }); // caustic strength zero
+  const tile = device.createTexture({ size: [256, 256], format: 'rgba8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+  const pixels = new Uint8Array(256 * 256 * 4);
+  for (let y = 0; y < 256; y++) for (let x = 0; x < 256; x++) pixels.set([x, y, 51, 255], (y * 256 + x) * 4);
+  device.queue.writeTexture({ texture: tile }, pixels, { bytesPerRow: 1024 }, [256, 256]);
+  const caustic = device.createTexture({ size: [1, 1], format: 'r32float', usage: GPUTextureUsage.TEXTURE_BINDING });
+  const poolBindings = device.createBindGroup({ layout: poolLayout, entries: [
+    { binding: 0, resource: { buffer: poolUniform } },
+    { binding: 1, resource: tile.createView() },
+    { binding: 2, resource: device.createSampler({ addressModeU: 'repeat', addressModeV: 'repeat', minFilter: 'linear', magFilter: 'linear' }) },
+    ...Array.from({ length: 5 }, (_, i) => ({ binding: i + 3, resource: caustic.createView() })),
+    { binding: 8, resource: device.createSampler() },
+  ] });
+  const depth = device.createTexture({ size: [size, size], format: 'depth24plus', usage: GPUTextureUsage.RENDER_ATTACHMENT });
+  const target = device.createTexture({ size: [size, size], format: 'rgba8unorm', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+  const sky = device.createTexture({ size: [1, 1], format: 'rgba8unorm', usage: GPUTextureUsage.TEXTURE_BINDING });
+  const readback = device.createBuffer({ size: size * size * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  renderer.setSkyboxTexture(sky);
+  renderer.setStateBuffer(stateBuffer);
+
+  async function render(cam, slope = 0, sphere = [0, 40, 0, 0]) {
+    for (let i = 0; i < grid.NUM_VERTS; i++) {
+      const h = slope * (-W / 2 + (i % grid.NX) * grid.DELTA_X);
+      state[2 * i] = h; state[2 * i + 1] = h;
+    }
+    device.queue.writeBuffer(stateBuffer, 0, state);
+    renderer.updateCamera(cam.vp, ...cam.eye);
+    renderer.updateLighting(0, sphere, sphere[3]);
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginRenderPass({
+      colorAttachments: [{ view: target.createView(), loadOp: 'clear', storeOp: 'store' }],
+      depthStencilAttachment: { view: depth.createView(), depthLoadOp: 'clear', depthStoreOp: 'store', depthClearValue: 1 },
+    });
+    renderer.render(pass, poolBindings); pass.end();
+    encoder.copyTextureToBuffer({ texture: target }, { buffer: readback, bytesPerRow: size * 4 }, [size, size]);
+    device.queue.submit([encoder.finish()]);
+    const validation = await device.popErrorScope();
+    assert(!validation, validation?.message);
+    device.pushErrorScope('validation');
+    await readback.mapAsync(GPUMapMode.READ);
+    const image = new Uint8Array(readback.getMappedRange()).slice();
+    readback.unmap();
+    return image;
+  }
+
+  // Independent CPU oracle: Snell's law, box exit distances (rather than the
+  // shader's five plane tests), and the nearest analytic sphere root.
+  function expected(cam, x, y, slope = 0, sphere = [0, 40, 0, 0]) {
+    const far = transform(cam.inv, [(x + 0.5) / size * 2 - 1, 1 - (y + 0.5) / size * 2, 1, 1]);
+    const incoming = unit(far.map((v, i) => v - cam.eye[i]));
+    const t = (WATER_LEVEL + slope * cam.eye[0] - cam.eye[1]) / (incoming[1] - slope * incoming[0]);
+    const origin = cam.eye.map((v, i) => v + t * incoming[i]);
+    const normal = unit([-slope, 1, 0]);
+    const cosine = -normal.reduce((sum, n, i) => sum + n * incoming[i], 0);
+    const eta = 1 / 1.333;
+    const normalTerm = eta * cosine - Math.sqrt(1 - eta * eta * (1 - cosine * cosine));
+    const ray = incoming.map((v, i) => eta * v + normalTerm * normal[i]);
+    const lower = [-TUB_WIDTH / 2, 0, -TUB_DEPTH / 2], upper = [TUB_WIDTH / 2, TUB_HEIGHT, TUB_DEPTH / 2];
+    const exits = ray.map((d, i) => Math.abs(d) < 1e-12 ? Infinity : ((d > 0 ? upper[i] : lower[i]) - origin[i]) / d);
+    const axis = exits.indexOf(Math.min(...exits));
+    let distance = exits[axis], kind = 'pool';
+    let n = [0, 0, 0]; n[axis] = -Math.sign(ray[axis]);
+    const delta = origin.map((v, i) => v - sphere[i]);
+    const b = delta.reduce((sum, v, i) => sum + v * ray[i], 0);
+    const discriminant = b * b - delta.reduce((sum, v) => sum + v * v, 0) + sphere[3] ** 2;
+    if (sphere[3] > 0 && discriminant >= 0) {
+      const root = -b - Math.sqrt(discriminant);
+      if (root > 0 && root < distance) { distance = root; kind = 'sphere'; }
+    }
+    const hit = origin.map((v, i) => v + distance * ray[i]);
+    const light = unit([0.2, 0.8, 0.3]);
+    let color;
+    if (kind === 'sphere') {
+      n = unit(hit.map((v, i) => v - sphere[i]));
+      const v = ray.map(x => -x), half = unit(light.map((l, i) => l + v[i]));
+      const diffuse = Math.max(0, n.reduce((sum, value, i) => sum + value * light[i], 0));
+      const spec = Math.max(0, n.reduce((sum, value, i) => sum + value * half[i], 0)) ** 64 * 0.6;
+      const rim = (1 - Math.max(0, n.reduce((sum, value, i) => sum + value * v[i], 0))) ** 3;
+      color = [0.93, 0.45, 0.30].map(c => c * (0.25 + 0.75 * diffuse + 0.2 * rim) + spec);
+    } else {
+      const uv = axis === 1 ? [(hit[0] / TUB_WIDTH + 0.5) * 3, (0.5 - hit[2] / TUB_DEPTH) * 6]
+        : axis === 0 ? [(0.5 - n[0] * hit[2] / TUB_DEPTH) * 6, hit[1] / TUB_HEIGHT]
+        : [(0.5 + n[2] * hit[0] / TUB_WIDTH) * 3, hit[1] / TUB_HEIGHT];
+      const ramp = uv.map(u => {
+        const p = (u - Math.floor(u)) * 256 - 0.5, lo = Math.floor(p), f = p - lo;
+        return (((lo + 256) % 256) * (1 - f) + ((lo + 257) % 256) * f) / 255;
+      });
+      const lightFactor = 0.4 + 0.6 * Math.max(0, n.reduce((sum, value, i) => sum + value * light[i], 0));
+      color = [...ramp, 0.2].map(v => v * lightFactor);
+    }
+    const f0 = ((1.333 - 1) / (1.333 + 1)) ** 2;
+    const fresnel = f0 + (1 - f0) * (1 - cosine) ** 5;
+    const half = unit(light.map((v, i) => v - incoming[i]));
+    const spec = Math.max(0, normal.reduce((sum, n, i) => sum + n * half[i], 0)) ** 128 * fresnel * 1.5;
+    return { rgb: color.map(v => Math.min(1, v * (1 - fresnel) + spec) * 255), kind, hit, origin, normal: n };
+  }
+  function check(image, x, y, oracle, name) {
+    const actual = [...image.slice((y * size + x) * 4, (y * size + x) * 4 + 3)];
+    const error = Math.max(...actual.map((v, i) => Math.abs(v - oracle.rgb[i])));
+    assert(error < 3, `${name}: RGB ${actual}, expected ${oracle.rgb}, error ${error}`);
+    return { actual, error };
+  }
+
+  try {
+    const overhead = camera([0, 300, 0]);
+    for (const slope of [0, 0.6, -0.6]) {
+      const image = await render(overhead, slope);
+      let maxError = 0;
+      for (const x of [96, 128, 160]) for (const y of [96, 128, 160]) {
+        maxError = Math.max(maxError, check(image, x, y, expected(overhead, x, y, slope), `Slope ${slope}`).error);
+      }
+      results.push({ name: `Snell-law bottom intersections, slope ${slope}`, maxError });
+    }
+    for (const [name, eye, aim, axis] of [
+      ['Right wall', [-300, 200, 0], [130, 80, 0], 0],
+      ['Left wall', [300, 200, 0], [-130, 80, 0], 0],
+      ['Front wall', [0, 200, 300], [0, 80, -280], 2],
+      ['Back wall', [0, 200, -300], [0, 80, 280], 2],
+    ]) {
+      const cam = camera(eye, aim), oracle = expected(cam, 128, 128);
+      assert(Math.abs(oracle.normal[axis]) === 1, `${name}: fixture must hit the wall`);
+      const measured = check(await render(cam), 128, 128, oracle, name);
+      results.push({ name, error: measured.error });
+    }
+    const hidden = camera([-350, 120, 0], [120, 80, 0]);
+    const hiddenHit = expected(hidden, 128, 128);
+    const wallY = hidden.eye[1] + (hiddenHit.hit[1] - hidden.eye[1]) * (-TUB_WIDTH / 2 - hidden.eye[0]) / (hiddenHit.hit[0] - hidden.eye[0]);
+    assert(wallY < TUB_HEIGHT, 'Receiver must be hidden behind the near pool wall');
+    check(await render(hidden), 128, 128, hiddenHit, 'Hidden receiver');
+    results.push({ name: 'Receiver hidden by the near wall still refracts' });
+    const narrow = camera([0, 300, 0], [0, 80, 0], 0.04);
+    let previous = null, maxStep = 0;
+    for (let i = 0; i <= 10; i++) {
+      const slope = 0.45 + i * 0.01, oracle = expected(narrow, 128, 128, slope);
+      assert(Math.abs(transform(narrow.vp, [...oracle.hit, 1])[0]) > 1, 'Receiver must be offscreen');
+      const measured = check(await render(narrow, slope), 128, 128, oracle, 'Offscreen receiver');
+      if (previous) maxStep = Math.max(maxStep, ...measured.actual.map((v, c) => Math.abs(v - previous[c])));
+      previous = measured.actual;
+    }
+    assert(maxStep <= 2, `Offscreen wave motion jumps by ${maxStep} color levels`);
+    results.push({ name: 'Offscreen receivers remain continuous as the normal moves', maxStep });
+    const kinds = new Set();
+    for (const x of [-32, -16, 0, 16, 32]) {
+      const sphere = [x, 40, 0, 20], oracle = expected(overhead, 128, 128, 0, sphere);
+      kinds.add(oracle.kind);
+      check(await render(overhead, 0, sphere), 128, 128, oracle, `Moving sphere x=${x}`);
+    }
+    assert(kinds.has('sphere') && kinds.has('pool'), 'Sphere motion must cross its silhouette');
+    check(await render(overhead, 0, [0, 40, 0, 0]), 128, 128, expected(overhead, 128, 128), 'Disabled sphere');
+    results.push({ name: 'Moving submerged silhouette and disabled sphere select the correct receiver' });
+    const validation = await device.popErrorScope();
+    assert(!validation, validation?.message);
+    assert(errors.length === 0, errors.join('\n'));
+    output.textContent = 'PASS\n' + JSON.stringify(results, null, 2);
+    return { passed: true, results };
+  } finally {
+    renderer.dispose(); stateBuffer.destroy(); poolUniform.destroy(); tile.destroy(); caustic.destroy();
+    depth.destroy(); target.destroy(); sky.destroy(); readback.destroy(); device.destroy();
+  }
+})().catch(error => {
+  output.textContent = 'FAIL\n' + error.stack;
+  return { passed: false, error: error.message, results };
+});
+</script>

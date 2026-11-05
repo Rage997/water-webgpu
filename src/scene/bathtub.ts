@@ -13,14 +13,12 @@ struct Camera {
 struct VertexInput {
   @location(0) position: vec3f,
   @location(1) normal: vec3f,
-  @location(2) texcoord: vec2f,
 };
 
 struct VertexOutput {
   @builtin(position) clipPos: vec4f,
   @location(0) worldPos: vec3f,
   @location(1) normal: vec3f,
-  @location(2) texcoord: vec2f,
 };
 
 @vertex
@@ -29,54 +27,70 @@ fn main(input: VertexInput) -> VertexOutput {
   out.clipPos = camera.viewProj * vec4f(input.position, 1.0);
   out.worldPos = input.position;
   out.normal = input.normal;
-  out.texcoord = input.texcoord;
   return out;
 }
 `;
 
-const TUB_FRAG = `
-@group(0) @binding(0) var<uniform> camera: Camera;
-
-struct Camera {
+// Shared bathtub material. `group` selects the bind group so the water
+// shader can include the same code and reuse the pool's bind group.
+// shadeTub is callable from nonuniform ray-hit branches (textureSampleLevel).
+export function makeTubMaterialShader(group: number): string {
+  return `
+@group(${group}) @binding(0) var<uniform> tubCamera: TubCamera;
+struct TubCamera {
   viewProj: mat4x4f,
   eye: vec3f,
   caustic: f32,
 };
-
-@group(0) @binding(1) var ourTexture: texture_2d<f32>;
-@group(0) @binding(2) var ourSampler: sampler;
-${CAUSTIC_RECEIVERS.map((receiver, face) => `@group(0) @binding(${3 + face}) var ${receiver.name}Caustic: texture_2d<f32>;`).join('\n')}
-@group(0) @binding(8) var causticSampler: sampler;
+@group(${group}) @binding(1) var tubTile: texture_2d<f32>;
+@group(${group}) @binding(2) var tubTileSampler: sampler;
+${CAUSTIC_RECEIVERS.map((receiver, face) => `@group(${group}) @binding(${3 + face}) var ${receiver.name}Caustic: texture_2d<f32>;`).join('\n')}
+@group(${group}) @binding(8) var causticSampler: sampler;
 
 const TUB_WIDTH: f32 = ${TUB_WIDTH};
 const TUB_DEPTH: f32 = ${TUB_DEPTH};
 const TUB_HEIGHT: f32 = ${TUB_HEIGHT};
 const WATER_LEVEL: f32 = ${WATER_LEVEL};
 
-@fragment
-fn main(in: VertexOutput) -> @location(0) vec4f {
-  let texColor = textureSample(ourTexture, ourSampler, in.texcoord).rgb;
+// Face-specific tile coordinates, shared by rasterized and refracted surfaces.
+fn tubTileUV(worldPos: vec3f, n: vec3f) -> vec2f {
+  if (n.y > 0.5) {
+    return vec2f((worldPos.x + TUB_WIDTH * 0.5) / TUB_WIDTH * 3.0,
+                 (TUB_DEPTH * 0.5 - worldPos.z) / TUB_DEPTH * 6.0);
+  }
+  if (abs(n.x) > 0.5) {
+    let u = select((worldPos.z + TUB_DEPTH * 0.5) / TUB_DEPTH,
+                   (TUB_DEPTH * 0.5 - worldPos.z) / TUB_DEPTH, n.x > 0.0) * 6.0;
+    return vec2f(u, worldPos.y / TUB_HEIGHT);
+  }
+  let u = select((worldPos.x + TUB_WIDTH * 0.5) / TUB_WIDTH,
+                 (TUB_WIDTH * 0.5 - worldPos.x) / TUB_WIDTH, n.z < 0.0) * 3.0;
+  return vec2f(u, worldPos.y / TUB_HEIGHT);
+}
+
+fn shadeTub(worldPos: vec3f, normal: vec3f) -> vec3f {
+  let n = normalize(normal);
+  let texColor = textureSampleLevel(tubTile, tubTileSampler, tubTileUV(worldPos, n), 0.0).rgb;
   let lightDir = normalize(vec3f(0.2, 0.8, 0.3));
-  let n = normalize(in.normal);
   let nDotL = max(dot(n, lightDir), 0.0);
   let ambient = 0.4;
   var direct = 0.6 * nDotL;
-  if (in.worldPos.y < WATER_LEVEL) { // underwater caustics only; above-water light is ordinary
+  if (worldPos.y < WATER_LEVEL) { // underwater caustics only; above-water light is ordinary
     var intensity = 0.0;
     // q = physical face coordinate - 0.5; normalized UV = (q + 0.5) / size.
     // Each face has its own map: wall coordinates use height, never floor XZ.
     if (n.y > 0.5) {
-      let uv = (in.worldPos.xz + vec2f(TUB_WIDTH, TUB_DEPTH) * 0.5) / vec2f(TUB_WIDTH, TUB_DEPTH);
+      let uv = (worldPos.xz + vec2f(TUB_WIDTH, TUB_DEPTH) * 0.5) / vec2f(TUB_WIDTH, TUB_DEPTH);
       intensity = textureSampleLevel(bottomCaustic, causticSampler, uv, 0.0).r;
     } else if (abs(n.x) > 0.5) {
-      let uv = vec2f(in.worldPos.z + TUB_DEPTH * 0.5, in.worldPos.y) / vec2f(TUB_DEPTH, TUB_HEIGHT);
+      let uv = vec2f(worldPos.z + TUB_DEPTH * 0.5, worldPos.y) / vec2f(TUB_DEPTH, TUB_HEIGHT);
       if (n.x > 0.0) {
         intensity = textureSampleLevel(leftCaustic, causticSampler, uv, 0.0).r;
       } else {
         intensity = textureSampleLevel(rightCaustic, causticSampler, uv, 0.0).r;
       }
     } else {
-      let uv = vec2f(in.worldPos.x + TUB_WIDTH * 0.5, in.worldPos.y) / vec2f(TUB_WIDTH, TUB_HEIGHT);
+      let uv = vec2f(worldPos.x + TUB_WIDTH * 0.5, worldPos.y) / vec2f(TUB_WIDTH, TUB_HEIGHT);
       if (n.z > 0.0) {
         intensity = textureSampleLevel(frontCaustic, causticSampler, uv, 0.0).r;
       } else {
@@ -86,28 +100,35 @@ fn main(in: VertexOutput) -> @location(0) vec4f {
     // Maps already measure receiver irradiance; a wall cosine would count it twice.
     let transmitted = 0.6 * lightDir.y * intensity;
     // Strength 0 preserves ordinary light; 1 uses irradiance. Only direct may vanish.
-    direct = max(0.0, direct + camera.caustic * (transmitted - direct));
+    direct = max(0.0, direct + tubCamera.caustic * (transmitted - direct));
   }
-  let finalColor = texColor * (ambient + direct);
-  return vec4f(finalColor, 1.0);
+  return texColor * (ambient + direct);
 }
+`;
+}
+
+const TUB_FRAG = `
+${makeTubMaterialShader(0)}
 
 struct VertexOutput {
   @builtin(position) clipPos: vec4f,
   @location(0) worldPos: vec3f,
   @location(1) normal: vec3f,
-  @location(2) texcoord: vec2f,
 };
+
+@fragment
+fn main(in: VertexOutput) -> @location(0) vec4f {
+  return vec4f(shadeTub(in.worldPos, in.normal), 1.0);
+}
 `;
 
 interface BoxSide {
   positions: number[];
   normals: number[];
-  texcoords: number[];
   indices: number[];
 }
 
-function makeBoxSide(px: number, py: number, pz: number, nx: number, ny: number, nz: number, ux: number, uy: number, uz: number, vx: number, vy: number, vz: number, w: number, h: number, repU: number, repV: number): BoxSide {
+function makeBoxSide(px: number, py: number, pz: number, nx: number, ny: number, nz: number, ux: number, uy: number, uz: number, vx: number, vy: number, vz: number, w: number, h: number): BoxSide {
   const halfW = w / 2;
   const halfH = h / 2;
 
@@ -132,10 +153,9 @@ function makeBoxSide(px: number, py: number, pz: number, nx: number, ny: number,
 
   const positions = [...p00, ...p10, ...p01, ...p11];
   const normals = [...n, ...n, ...n, ...n];
-  const texcoords = [0, 0, repU, 0, 0, repV, repU, repV];
   const indices = [0, 1, 2, 1, 3, 2];
 
-  return { positions, normals, texcoords, indices };
+  return { positions, normals, indices };
 }
 
 export class Bathtub {
@@ -163,15 +183,15 @@ export class Bathtub {
     // 5 sides: bottom, 2 short sides (front/back), 2 long sides (left/right)
     const sides: BoxSide[] = [
       // Bottom: Y=0, normal (0,1,0), tangent along X and Z
-      makeBoxSide(0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, -1, tubW, tubD, 3, 6),
+      makeBoxSide(0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, -1, tubW, tubD),
       // Short side front: Z=-tubD/2, normal (0,0,1), facing forward
-      makeBoxSide(0, wallH/2, -tubD/2, 0, 0, 1, 1, 0, 0, 0, 1, 0, tubW, wallH, 3, 1),
+      makeBoxSide(0, wallH/2, -tubD/2, 0, 0, 1, 1, 0, 0, 0, 1, 0, tubW, wallH),
       // Short side back: Z=tubD/2, normal (0,0,-1)
-      makeBoxSide(0, wallH/2, tubD/2, 0, 0, -1, -1, 0, 0, 0, 1, 0, tubW, wallH, 3, 1),
+      makeBoxSide(0, wallH/2, tubD/2, 0, 0, -1, -1, 0, 0, 0, 1, 0, tubW, wallH),
       // Long side left: X=-tubW/2, normal (1,0,0)
-      makeBoxSide(-tubW/2, wallH/2, 0, 1, 0, 0, 0, 0, -1, 0, 1, 0, tubD, wallH, 6, 1),
+      makeBoxSide(-tubW/2, wallH/2, 0, 1, 0, 0, 0, 0, -1, 0, 1, 0, tubD, wallH),
       // Long side right: X=tubW/2, normal (-1,0,0)
-      makeBoxSide(tubW/2, wallH/2, 0, -1, 0, 0, 0, 0, 1, 0, 1, 0, tubD, wallH, 6, 1),
+      makeBoxSide(tubW/2, wallH/2, 0, -1, 0, 0, 0, 0, 1, 0, 1, 0, tubD, wallH),
     ];
 
     const vertexComponents: number[] = [];
@@ -182,11 +202,9 @@ export class Bathtub {
       const n = s.positions.length / 3;
       for (let i = 0; i < n; i++) {
         const i3 = i * 3;
-        const i2 = i * 2;
         vertexComponents.push(
           s.positions[i3], s.positions[i3+1], s.positions[i3+2],
           s.normals[i3], s.normals[i3+1], s.normals[i3+2],
-          s.texcoords[i2], s.texcoords[i2+1],
         );
       }
       for (const idx of s.indices) allIndices.push(idx + baseIdx);
@@ -291,11 +309,10 @@ export class Bathtub {
         module: vertModule,
         entryPoint: 'main',
         buffers: [{
-          arrayStride: 32,
+          arrayStride: 24,
           attributes: [
             { format: 'float32x3', offset: 0, shaderLocation: 0 },
             { format: 'float32x3', offset: 12, shaderLocation: 1 },
-            { format: 'float32x2', offset: 24, shaderLocation: 2 },
           ],
         }],
       },

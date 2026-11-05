@@ -38,10 +38,10 @@ async function main() {
 
   let grid = makeGrid(RESOLUTION_TIERS.high);
   let waterCompute = new WaterCompute(device, grid);
-  let waterRender = new WaterRender(device, format, depthFormat, grid);
+  const bathtub = new Bathtub(device, format, depthFormat);
+  let waterRender = new WaterRender(device, format, depthFormat, grid, bathtub.pipeline.getBindGroupLayout(0));
   let caustics = new Caustics(device, grid);
 
-  const bathtub = new Bathtub(device, format, depthFormat);
   const floor = new Floor(device, format, depthFormat);
   const skybox = new Skybox(device, format, depthFormat);
   const rain = new Rain(device, format, depthFormat);
@@ -160,7 +160,7 @@ async function main() {
     waterCompute.rippleSize = prevCompute.rippleSize;
     waterCompute.flow.viscosity = prevCompute.flow.viscosity;
     const prevCaustics = caustics;
-    waterRender = new WaterRender(device, format, depthFormat, grid);
+    waterRender = new WaterRender(device, format, depthFormat, grid, bathtub.pipeline.getBindGroupLayout(0));
     waterRender.setSkyboxTexture(skybox.getTexture());
     waterRender.setStateBuffer(waterCompute.currentStateBuffer);
     caustics = new Caustics(device, grid);
@@ -265,6 +265,7 @@ async function main() {
     clicks.length = 0;
 
     // Rebind state buffer if it swapped
+    waterRender.setSkyboxTexture(skybox.getTexture());
     waterRender.setStateBuffer(waterCompute.currentStateBuffer);
     caustics.update(commandEncoder, waterCompute.currentStateBuffer);
 
@@ -275,9 +276,9 @@ async function main() {
     floor.updateCamera(vp);
     sphere.updateCamera(vp, camera.eyeX, camera.eyeY, camera.eyeZ);
     skybox.updateCamera(camera.viewMatrix, camera.projMatrix);
-    waterRender.updateLighting(skybox.intensity);
+    waterRender.updateLighting(skybox.intensity, sphere.position, sphere.enabled ? sphere.radius : 0);
 
-    // Render
+    // Exact pool/sphere intersections let water share the ordinary scene pass.
     const renderPass = commandEncoder.beginRenderPass({
       colorAttachments: [{
         view: context.getCurrentTexture().createView(),
@@ -297,9 +298,8 @@ async function main() {
     bathtub.render(renderPass);
     floor.render(renderPass);
     if (sphere.enabled) sphere.render(renderPass);
-    waterRender.render(renderPass);
+    waterRender.render(renderPass, bathtub.bindGroup);
     rain.render(renderPass);
-
     renderPass.end();
 
     device.queue.submit([commandEncoder.finish()]);

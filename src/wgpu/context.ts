@@ -41,7 +41,11 @@ export async function initWebGPU(canvas: HTMLCanvasElement) {
     }
   }
 
-  return { device, context, format, depthFormat, depthTexture: () => depthTexture, resize, width: () => width, height: () => height };
+  return {
+    device, context, format, depthFormat,
+    depthTexture: () => depthTexture,
+    resize, width: () => width, height: () => height,
+  };
 }
 
 function createDepthTexture(device: GPUDevice, format: GPUTextureFormat, width: number, height: number): GPUTexture {
