@@ -89,6 +89,14 @@ async function main() {
   const rippleSizeValue = document.getElementById('ripple-size-value') as HTMLSpanElement;
   const causticsToggle = document.getElementById('caustics-toggle') as HTMLInputElement;
   const causticsIntensitySlider = document.getElementById('caustics-intensity') as HTMLInputElement;
+  const causticsQualitySelect = document.getElementById('caustics-quality') as HTMLSelectElement;
+  causticsQualitySelect.addEventListener('change', () => {
+    const previous = caustics;
+    caustics = new Caustics(device, grid, Number(causticsQualitySelect.value) as 1 | 2 | 4);
+    window.causticsControl = caustics;
+    bathtub.setCausticTextures(caustics.causticTextures);
+    previous.dispose();
+  });
   const causticsIntensityValue = document.getElementById('caustics-intensity-value') as HTMLSpanElement;
   const rainToggle = document.getElementById('rain-toggle') as HTMLInputElement;
   rain.enabled = rainToggle.checked;
@@ -100,6 +108,12 @@ async function main() {
   sphere.enabled = sphereToggle.checked;
   sphereToggle.addEventListener('input', () => {
     sphere.enabled = sphereToggle.checked;
+  });
+
+  const refractionToggle = document.getElementById('refraction-toggle') as HTMLInputElement;
+  waterRender.refractionEnabled = refractionToggle.checked;
+  refractionToggle.addEventListener('input', () => {
+    waterRender.refractionEnabled = refractionToggle.checked;
   });
 
   const rainStrengthSlider = document.getElementById('rain-strength') as HTMLInputElement;
@@ -161,9 +175,10 @@ async function main() {
     waterCompute.flow.viscosity = prevCompute.flow.viscosity;
     const prevCaustics = caustics;
     waterRender = new WaterRender(device, format, depthFormat, grid, bathtub.pipeline.getBindGroupLayout(0));
+    waterRender.refractionEnabled = refractionToggle.checked;
     waterRender.setSkyboxTexture(skybox.getTexture());
     waterRender.setStateBuffer(waterCompute.currentStateBuffer);
-    caustics = new Caustics(device, grid);
+    caustics = new Caustics(device, grid, prevCaustics.texelsPerUnit);
     window.causticsControl = caustics;
     bathtub.setCausticTextures(caustics.causticTextures);
 

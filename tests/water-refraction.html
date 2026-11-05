@@ -91,14 +91,14 @@ window.refractionResult = (async () => {
 
   // Independent CPU oracle: Snell's law, box exit distances (rather than the
   // shader's five plane tests), and the nearest analytic sphere root.
-  function expected(cam, x, y, slope = 0, sphere = [0, 40, 0, 0]) {
+  function expected(cam, x, y, slope = 0, sphere = [0, 40, 0, 0], refraction = true) {
     const far = transform(cam.inv, [(x + 0.5) / size * 2 - 1, 1 - (y + 0.5) / size * 2, 1, 1]);
     const incoming = unit(far.map((v, i) => v - cam.eye[i]));
     const t = (WATER_LEVEL + slope * cam.eye[0] - cam.eye[1]) / (incoming[1] - slope * incoming[0]);
     const origin = cam.eye.map((v, i) => v + t * incoming[i]);
     const normal = unit([-slope, 1, 0]);
     const cosine = -normal.reduce((sum, n, i) => sum + n * incoming[i], 0);
-    const eta = 1 / 1.333;
+    const eta = refraction ? 1 / 1.333 : 1;
     const normalTerm = eta * cosine - Math.sqrt(1 - eta * eta * (1 - cosine * cosine));
     const ray = incoming.map((v, i) => eta * v + normalTerm * normal[i]);
     const lower = [-TUB_WIDTH / 2, 0, -TUB_DEPTH / 2], upper = [TUB_WIDTH / 2, TUB_HEIGHT, TUB_DEPTH / 2];
@@ -156,6 +156,17 @@ window.refractionResult = (async () => {
         maxError = Math.max(maxError, check(image, x, y, expected(overhead, x, y, slope), `Slope ${slope}`).error);
       }
       results.push({ name: `Snell-law bottom intersections, slope ${slope}`, maxError });
+    }
+    for (const enabled of [false, true]) {
+      renderer.refractionEnabled = enabled;
+      const slope = 0.6, image = await render(overhead, slope);
+      let maxError = 0;
+      for (const x of [96, 128, 160]) for (const y of [96, 128, 160]) {
+        maxError = Math.max(maxError, check(image, x, y,
+          expected(overhead, x, y, slope, [0, 40, 0, 0], enabled),
+          `Refraction ${enabled ? 'restored' : 'off'}`).error);
+      }
+      results.push({ name: `Refraction ${enabled ? 'restored' : 'off uses straight transmission'}`, maxError });
     }
     for (const [name, eye, aim, axis] of [
       ['Right wall', [-300, 200, 0], [130, 80, 0], 0],

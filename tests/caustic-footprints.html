@@ -54,23 +54,25 @@ function flatPower(height) {
     return Math.abs(area) * 0.5 * Math.abs(direction[axis] / direction[1]);
   });
 }
-function flatInteriorError(map, face) {
+function flatInteriorError(map, face, scale = 1) {
   if (face === 2 || face === 4) {
     let maximum = 0;
     for (const value of map) maximum = Math.max(maximum, value);
     return maximum;
   }
   const r = CAUSTIC_RECEIVERS[face];
+  const width = r.width * scale, height = r.height * scale;
   const expected = face === 0 ? 1 : Math.abs(direction[face === 1 ? 0 : 2] / direction[1]);
   let error = 0;
-  for (let y = 3; y < r.height - 3; y++) for (let x = 3; x < r.width - 3; x++) {
-    const p = face === 0 ? [x + 0.5 - TUB_WIDTH / 2, 0, y + 0.5 - TUB_DEPTH / 2]
-      : face === 1 ? [-TUB_WIDTH / 2, y + 0.5, x + 0.5 - TUB_DEPTH / 2]
-        : [x + 0.5 - TUB_WIDTH / 2, y + 0.5, -TUB_DEPTH / 2];
+  for (let y = 3 * scale; y < height - 3 * scale; y++) for (let x = 3 * scale; x < width - 3 * scale; x++) {
+    const wx = (x + 0.5) / scale, wy = (y + 0.5) / scale;
+    const p = face === 0 ? [wx - TUB_WIDTH / 2, 0, wy - TUB_DEPTH / 2]
+      : face === 1 ? [-TUB_WIDTH / 2, wy, wx - TUB_DEPTH / 2]
+        : [wx - TUB_WIDTH / 2, wy, -TUB_DEPTH / 2];
     const distance = (p[1] - WATER_LEVEL) / direction[1];
     const sx = p[0] - distance * direction[0], sz = p[2] - distance * direction[2];
     if (distance > 0 && Math.abs(sx) < W / 2 - 2 && Math.abs(sz) < H / 2 - 2) {
-      error = Math.max(error, Math.abs(map[x + y * r.width] - expected));
+      error = Math.max(error, Math.abs(map[x + y * width] - expected));
     }
   }
   return error;
@@ -83,9 +85,9 @@ window.causticRegression = (async () => {
   const errors = [];
   device.addEventListener('uncapturederror', event => errors.push(event.error.message));
   try {
-    for (const resolution of [60, 300]) {
+    for (const [resolution, scale] of [[60, 1], [300, 1], [60, 2], [60, 4]]) {
       device.pushErrorScope('validation');
-      const grid = makeGrid(resolution), caustics = new Caustics(device, grid);
+      const grid = makeGrid(resolution), caustics = new Caustics(device, grid, scale);
       const state = device.createBuffer({ size: grid.NUM_VERTS * 8, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
       try {
         for (const field of ['flat', 'waves', 'corner', 'flat', 'raised']) {
@@ -108,7 +110,7 @@ window.causticRegression = (async () => {
               assert(Number.isFinite(value) && value >= 0, `${field}: invalid irradiance`);
               sum += value;
             }
-            return sum;
+            return sum / (scale * scale);
           });
           const total = powers.reduce((sum, value) => sum + value, 0);
           const expected = field === 'raised' ? flatPower(WATER_LEVEL + 40) : flatPower(WATER_LEVEL);
@@ -118,9 +120,9 @@ window.causticRegression = (async () => {
             powers.forEach((power, face) => assert(Math.abs(power - expected[face]) < 0.1, `${field}: incorrect face ${face} allocation`));
           }
           if (field === 'flat') {
-            maps.forEach((map, face) => assert(flatInteriorError(map, face) < 0.0002, `Flat face ${face}: sampling bands or wrong footprint density`));
+            maps.forEach((map, face) => assert(flatInteriorError(map, face, scale) < 0.0002, `Flat face ${face}: sampling bands or wrong footprint density`));
           }
-          results.push({ resolution, field, total, powers });
+          results.push({ resolution, scale, field, total, powers });
           output.textContent = JSON.stringify(results, null, 2);
         }
       } finally {

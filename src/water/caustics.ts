@@ -18,7 +18,7 @@ import { W, H, WATER_LEVEL, type Grid } from '../types.ts';
 import { readBufferAsync, readTextureAsync } from '../utils/gpu-debug.ts';
 import { CAUSTIC_RECEIVERS, type CausticFace, type CausticTextures } from './receivers.ts';
 import {
-  makeFootprintShader, makeResolveShader, RECEIVER_REGIONS, RECEIVER_PIXEL_COUNT,
+  makeFootprintShader, makeResolveShader,
   SEAM_DISPATCH_SHADER,
 } from './caustic-footprints.ts';
 
@@ -132,16 +132,27 @@ export class Caustics {
   private _resolvePipelines: GPUComputePipeline[];
   private _resolveBindGroups: GPUBindGroup[];
   private _stateBindings = new Map<GPUBuffer, { gradient: GPUBindGroup, footprint: GPUBindGroup }>();
+  private _receiverRegions: { width: number; height: number; offset: number }[];
+  readonly texelsPerUnit: 1 | 2 | 4;
 
-  constructor(device: GPUDevice, grid: Grid) {
+  constructor(device: GPUDevice, grid: Grid, texelsPerUnit: 1 | 2 | 4 = 1) {
     this._device = device;
     this._grid = grid;
+    this.texelsPerUnit = texelsPerUnit;
+    let pixelCount = 0;
+    this._receiverRegions = CAUSTIC_RECEIVERS.map(receiver => {
+      const width = receiver.width * texelsPerUnit;
+      const height = receiver.height * texelsPerUnit;
+      const region = { width, height, offset: pixelCount };
+      pixelCount += width * height;
+      return region;
+    });
     this._gradientBuffer = device.createBuffer({
       size: grid.NUM_VERTS * 8,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
     });
     this._irradianceBuffer = device.createBuffer({
-      size: RECEIVER_PIXEL_COUNT * 4,
+      size: pixelCount * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
     this._seamQueue = device.createBuffer({
@@ -153,7 +164,7 @@ export class Caustics {
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT,
     });
     const createMap = (face: CausticFace) => device.createTexture({
-      size: [CAUSTIC_RECEIVERS[face].width, CAUSTIC_RECEIVERS[face].height],
+      size: [this._receiverRegions[face].width, this._receiverRegions[face].height],
       format: 'r32float',
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC,
     });
@@ -168,7 +179,7 @@ export class Caustics {
       },
     });
     const footprintModule = device.createShaderModule({
-      code: makeFootprintShader(makeCommonWgsl(grid.NX, grid.NZ, grid.DELTA_X, grid.DELTA_Z)),
+      code: makeFootprintShader(makeCommonWgsl(grid.NX, grid.NZ, grid.DELTA_X, grid.DELTA_Z), this._receiverRegions, texelsPerUnit),
     });
     const footprintLayout = device.createPipelineLayout({
       bindGroupLayouts: [device.createBindGroupLayout({
@@ -195,9 +206,9 @@ export class Caustics {
         { binding: 1, resource: { buffer: this._seamDispatch } },
       ],
     });
-    this._resolvePipelines = RECEIVER_REGIONS.map(region => device.createComputePipeline({
+    this._resolvePipelines = this._receiverRegions.map(region => device.createComputePipeline({
       layout: 'auto',
-      compute: { module: device.createShaderModule({ code: makeResolveShader(region) }), entryPoint: 'main' },
+      compute: { module: device.createShaderModule({ code: makeResolveShader(region, texelsPerUnit) }), entryPoint: 'main' },
     }));
     this._resolveBindGroups = this._resolvePipelines.map((pipeline, face) => device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
@@ -266,8 +277,8 @@ export class Caustics {
     pass.dispatchWorkgroupsIndirect(this._seamDispatch, 0);
     pass.end();
     pass = encoder.beginComputePass();
-    for (let face = 0; face < RECEIVER_REGIONS.length; face++) {
-      const receiver = RECEIVER_REGIONS[face];
+    for (let face = 0; face < this._receiverRegions.length; face++) {
+      const receiver = this._receiverRegions[face];
       pass.setPipeline(this._resolvePipelines[face]);
       pass.setBindGroup(0, this._resolveBindGroups[face]);
       pass.dispatchWorkgroups(Math.ceil(receiver.width / 8), Math.ceil(receiver.height / 8));
@@ -280,7 +291,7 @@ export class Caustics {
   }
 
   async readCausticAsync(face: CausticFace): Promise<Float32Array> {
-    const { width, height } = CAUSTIC_RECEIVERS[face];
+    const { width, height } = this._receiverRegions[face];
     return readTextureAsync(this._device, this._causticTextures[face], width, height);
   }
 

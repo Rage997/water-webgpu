@@ -41,7 +41,7 @@ const SEAM_DEPTH = 8;
 // sampling. Keeping it generated in caustics.ts lets the shader specialize its
 // grid dimensions and avoids dynamic indexing overhead for those constants.
 
-export function makeFootprintShader(common: string): string {
+export function makeFootprintShader(common: string, regions = RECEIVER_REGIONS, texelsPerUnit = 1): string {
   return `
 @group(0) @binding(0) var<storage, read> state: array<vec2f>;
 @group(0) @binding(1) var<storage, read> grad: array<vec2f>;
@@ -49,8 +49,8 @@ export function makeFootprintShader(common: string): string {
 struct SeamQueue { count: atomic<u32>, triangles: array<u32> };
 @group(0) @binding(3) var<storage, read_write> seamQueue: SeamQueue;
 ${common}
-const SIZE = array<vec2u, 5>(${RECEIVER_REGIONS.map(r => `vec2u(${r.width}, ${r.height})`).join(', ')});
-const OFFSET = array<u32, 5>(${RECEIVER_REGIONS.map(r => `${r.offset}u`).join(', ')});
+const SIZE = array<vec2u, 5>(${regions.map(r => `vec2u(${r.width}, ${r.height})`).join(', ')});
+const OFFSET = array<u32, 5>(${regions.map(r => `${r.offset}u`).join(', ')});
 const HALF_X: f32 = ${TUB_WIDTH / 2};
 const HALF_Z: f32 = ${TUB_DEPTH / 2};
 const WALL_HEIGHT: f32 = ${TUB_HEIGHT};
@@ -68,9 +68,9 @@ fn rayAt(p: vec2f) -> Ray {
 // Convert world positions to receiver-local texel coordinates:
 // bottom=XZ, X walls=ZY, and Z walls=XY.
 fn coordinates(p: vec3f, face: u32) -> vec2f {
-  if (face == 0u) { return p.xz + vec2f(HALF_X, HALF_Z); }
-  if (face <= 2u) { return vec2f(p.z + HALF_Z, p.y); }
-  return vec2f(p.x + HALF_X, p.y);
+  if (face == 0u) { return (p.xz + vec2f(HALF_X, HALF_Z)) * ${texelsPerUnit}.0; }
+  if (face <= 2u) { return vec2f(p.z + HALF_Z, p.y) * ${texelsPerUnit}.0; }
+  return vec2f(p.x + HALF_X, p.y) * ${texelsPerUnit}.0;
 }
 
 // Signed distance to a receiver plane; non-positive values are behind or
@@ -108,7 +108,7 @@ fn firstHit(ray: Ray) -> Hit {
   }
   if (hit.face != NO_FACE) {
     let point = coordinates(ray.origin + hit.distance * ray.direction, hit.face);
-    if (hit.face != 0u && point.y > WALL_HEIGHT) { hit.face = NO_FACE; }
+    if (hit.face != 0u && point.y > WALL_HEIGHT * ${texelsPerUnit}.0) { hit.face = NO_FACE; }
     else { hit.point = clamp(point, vec2f(0.0), vec2f(SIZE[hit.face])); }
   }
   return hit;
@@ -352,7 +352,7 @@ fn seams(@builtin(global_invocation_id) id: vec3u) {
 `;
 }
 
-export function makeResolveShader({ width, height, offset }: typeof RECEIVER_REGIONS[number]): string {
+export function makeResolveShader({ width, height, offset }: typeof RECEIVER_REGIONS[number], texelsPerUnit = 1): string {
   return `
 @group(0) @binding(0) var<storage, read> irradiance: array<u32>;
 @group(0) @binding(1) var outputMap: texture_storage_2d<r32float, write>;
@@ -360,7 +360,8 @@ export function makeResolveShader({ width, height, offset }: typeof RECEIVER_REG
 fn main(@builtin(global_invocation_id) id: vec3u) {
   if (id.x >= ${width}u || id.y >= ${height}u) { return; }
   let value = bitcast<f32>(irradiance[${offset}u + id.x + id.y * ${width}u]);
-  textureStore(outputMap, vec2i(id.xy), vec4f(value));
+  // Convert deposited power to irradiance per world-unit area.
+  textureStore(outputMap, vec2i(id.xy), vec4f(value * ${texelsPerUnit * texelsPerUnit}.0));
 }
 `;
 }

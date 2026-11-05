@@ -104,7 +104,10 @@ fn main(in: VertexOutput) -> @location(0) vec4f {
   let fromAir = camera.eye.y >= in.worldPos.y;
   let n = select(-geometricNormal, geometricNormal, dot(geometricNormal, v) >= 0.0);
   let lightDir = normalize(vec3f(0.2, 0.8, 0.3));
-  let refractDir = refract(-v, n, select(WATER_IOR, 1.0 / WATER_IOR, fromAir));
+  var refractDir = -v;
+  if (lighting.sky.y > 0.5) {
+    refractDir = refract(-v, n, select(WATER_IOR, 1.0 / WATER_IOR, fromAir));
+  }
   let totalInternalReflection = dot(refractDir, refractDir) < 0.0001;
   let fresnel = select(fresnel_schlick(max(dot(n, v), 0.0), F0), 1.0, totalInternalReflection);
   
@@ -147,6 +150,7 @@ export class WaterRender {
   lightingBuffer!: GPUBuffer;
   skyboxTexture!: GPUTexture;
   skyboxSampler!: GPUSampler;
+  refractionEnabled = true;
 
   private _device: GPUDevice;
   private _lighting = new Float32Array(8);
@@ -275,6 +279,7 @@ export class WaterRender {
 
   updateLighting(skyIntensity: number, spherePosition: readonly number[], sphereRadius: number) {
     this._lighting[0] = skyIntensity;
+    this._lighting[1] = this.refractionEnabled ? 1 : 0;
     this._lighting[4] = spherePosition[0];
     this._lighting[5] = spherePosition[1];
     this._lighting[6] = spherePosition[2];

@@ -31,6 +31,9 @@
           <details open>
             <summary>Water <span class="section-note">Motion &amp; flow</span></summary>
             <div class="section-body">
+              <div class="toggle-row"><label for="sphere-toggle">Ball</label><input type="checkbox" id="sphere-toggle" role="switch" checked></div>
+              <div class="toggle-row"><label for="refraction-toggle">Refraction</label><input type="checkbox" id="refraction-toggle" role="switch" checked aria-describedby="refraction-help"></div>
+              <p id="refraction-help" class="hint toggle-hint">Bend the view through the water. Switch off for an undistorted view beneath the surface.</p>
               <div class="control-group"><div class="slider-header"><label for="simulation-speed">Simulation speed</label><output id="simulation-speed-value" for="simulation-speed">0.50×</output></div><input type="range" id="simulation-speed" min="0" max="2" step="0.05" value="0.5" aria-describedby="speed-help"><p id="speed-help" class="hint">Slow time down. Set to zero to pause.</p></div>
               <div class="control-group"><div class="slider-header"><label for="wave-speed">Wave speed</label><output id="wave-speed-value" for="wave-speed">1.00</output></div><input type="range" id="wave-speed" min="0.2" max="2" step="0.05" value="1.0" aria-describedby="wave-help"><p id="wave-help" class="hint">How quickly waves travel across the pool.</p></div>
               <div class="control-group"><div class="slider-header"><label for="damping">Damping</label><output id="damping-value" for="damping">0.20</output></div><input type="range" id="damping" min="0" max="1" step="0.01" value="0.2" aria-describedby="damping-help"><p id="damping-help" class="hint">Higher values let waves settle sooner.</p></div>
@@ -42,8 +45,6 @@
             <div class="section-body">
               <div class="control-group"><div class="slider-header"><label for="ripple-amplitude">Ripple amplitude</label><output id="ripple-amplitude-value" for="ripple-amplitude">40</output></div><input type="range" id="ripple-amplitude" min="5" max="80" step="1" value="40"></div>
               <div class="control-group"><div class="slider-header"><label for="ripple-size">Ripple size</label><output id="ripple-size-value" for="ripple-size">1.0</output></div><input type="range" id="ripple-size" min="0.3" max="3" step="0.1" value="1.0"></div>
-              <div class="toggle-row"><label for="sphere-toggle">Ball</label><input type="checkbox" id="sphere-toggle" role="switch" checked></div>
-              <p class="hint toggle-hint">Drag the ball down to submerge it or up to lift it out. Shift-drag moves it horizontally at the same depth.</p>
               <div class="toggle-row"><label for="rain-toggle">Rain</label><input type="checkbox" id="rain-toggle" role="switch" checked></div>
               <fieldset id="rain-controls"><legend class="sr-only">Rain settings</legend>
                 <div class="control-group"><div class="slider-header"><label for="rain-strength">Rain strength</label><output id="rain-strength-value" for="rain-strength">2</output></div><input type="range" id="rain-strength" min="0" max="5" step="1" value="2"></div>
@@ -59,12 +60,18 @@
               <div class="control-group"><div class="slider-header"><label for="sky-intensity">Sky brightness</label><output id="sky-intensity-value" for="sky-intensity">1.0</output></div><input type="range" id="sky-intensity" min="0" max="3" step="0.1" value="1.0"></div>
               <div class="toggle-row"><label for="caustics-toggle">Caustics</label><input type="checkbox" id="caustics-toggle" role="switch" checked></div>
               <p class="hint toggle-hint">The shifting patterns of light beneath the water.</p>
-              <fieldset id="caustics-controls"><legend class="sr-only">Caustics settings</legend><div class="control-group"><div class="slider-header"><label for="caustics-intensity">Caustics intensity</label><output id="caustics-intensity-value" for="caustics-intensity">1.0</output></div><input type="range" id="caustics-intensity" min="0" max="3" step="0.1" value="1.0"></div></fieldset>
+              <fieldset id="caustics-controls">
+                <legend class="sr-only">Caustics settings</legend>
+                <div class="control-group"><div class="slider-header"><label for="caustics-intensity">Caustics intensity</label><output id="caustics-intensity-value" for="caustics-intensity">1.0</output></div><input type="range" id="caustics-intensity" min="0" max="3" step="0.1" value="1.0"></div>
+              </fieldset>
             </div>
           </details>
           <details>
             <summary>Quality <span class="section-note">GPU workload</span></summary>
-            <div class="section-body"><div class="control-group"><label for="resolution-select">Water resolution</label><select id="resolution-select" aria-describedby="resolution-help"><option value="ultralow">Ultra low</option><option value="low">Low</option><option value="medium">Medium</option><option value="high" selected>High</option><option value="veryhigh">Very high</option></select><p class="hint" id="resolution-help">Higher quality uses more GPU power. Changing resolution resets the water.</p></div></div>
+            <div class="section-body">
+              <div class="control-group"><label for="resolution-select">Water resolution</label><select id="resolution-select" aria-describedby="resolution-help"><option value="ultralow">Ultra low</option><option value="low">Low</option><option value="medium">Medium</option><option value="high" selected>High</option><option value="veryhigh">Very high</option></select><p class="hint" id="resolution-help">Higher quality uses more GPU power. Changing resolution resets the water.</p></div>
+              <div class="control-group"><label for="caustics-quality">Caustics quality</label><select id="caustics-quality" aria-describedby="caustics-quality-help"><option value="1" selected>Standard</option><option value="2">High (2× resolution)</option><option value="4">Ultra (4× resolution)</option></select><p id="caustics-quality-help" class="hint">Sharper light patterns on the floor and walls. Higher quality uses more GPU power; water motion is preserved.</p></div>
+            </div>
           </details>
         </fieldset>
       </div>
